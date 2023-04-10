@@ -325,7 +325,7 @@ impl Renderer {
         let vminor = ash::vk::api_version_minor(device_properties.api_version);
         let vpatch = ash::vk::api_version_patch(device_properties.api_version);
         println!("\tAPI Version: {}.{}.{}", vmajor, vminor, vpatch);
-        println!("\tYES Queue Family: {}", device_queue_families.len());
+        println!("\tSupports Queue Families: {}", device_queue_families.len());
         println!("\t\tQueue Count | Graphics, Compute, Transfer, Sparse Binding");
         for queue_family in device_queue_families.iter() {
             let is_graphics_support = if queue_family
@@ -370,7 +370,7 @@ impl Renderer {
             );
         }
         println!(
-            "\tGeometry Shader YES: {}",
+            "\tGeometry Shader Support: {}",
             if device_features.geometry_shader == 1 {
                 "YES"
             } else {
