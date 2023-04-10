@@ -365,6 +365,7 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.device.destroy_device(None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
                     .destroy_debug_utils_messenger(self.debug_messenger, None);
