@@ -1,12 +1,43 @@
-use crate::{helpers::vk_to_string, Renderer, VALIDATION};
+use crate::{helpers::vk_to_string, SurfaceData, VALIDATION};
+
+pub struct DeviceExtension {
+    pub names: [&'static str; 1],
+}
+
 pub struct QueueFamilyIndices {
     pub graphics_family: Option<u32>,
     pub present_family: Option<u32>,
 }
 
-pub struct SurfaceData {
-    pub surface: ash::vk::SurfaceKHR,
-    pub surface_loader: ash::extensions::khr::Surface,
+pub struct SwapChainSupportInfo {
+    pub capabilities: ash::vk::SurfaceCapabilitiesKHR,
+    pub formats: Vec<ash::vk::SurfaceFormatKHR>,
+    pub present_modes: Vec<ash::vk::PresentModeKHR>,
+}
+
+pub fn query_swapchain_support(
+    physical_device: ash::vk::PhysicalDevice,
+    surface_data: &SurfaceData,
+) -> SwapChainSupportInfo {
+    unsafe {
+        let capabilities = surface_data
+            .surface_loader
+            .get_physical_device_surface_capabilities(physical_device, surface_data.surface)
+            .unwrap();
+        let formats = surface_data
+            .surface_loader
+            .get_physical_device_surface_formats(physical_device, surface_data.surface)
+            .unwrap();
+        let present_modes = surface_data
+            .surface_loader
+            .get_physical_device_surface_present_modes(physical_device, surface_data.surface)
+            .unwrap();
+        SwapChainSupportInfo {
+            capabilities,
+            formats,
+            present_modes,
+        }
+    }
 }
 
 pub fn check_validation_layer_support(entry: &ash::Entry) -> bool {
@@ -41,6 +72,7 @@ pub fn is_physical_device_suitable(
     instance: &ash::Instance,
     physical_device: ash::vk::PhysicalDevice,
     surface_data: &SurfaceData,
+    device_extensions: &DeviceExtension,
 ) -> bool {
     let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
     let device_features = unsafe { instance.get_physical_device_features(physical_device) };
@@ -116,8 +148,15 @@ pub fn is_physical_device_suitable(
         }
     );
     let indices = find_queue_family(instance, physical_device, surface_data);
-
-    return indices.graphics_family.is_some();
+    let device_extensions_supported =
+        check_device_extension_support(instance, physical_device, device_extensions);
+    let swapchain_supported = if device_extensions_supported {
+        let swapchain_support = query_swapchain_support(physical_device, surface_data);
+        !swapchain_support.formats.is_empty() && !swapchain_support.present_modes.is_empty()
+    } else {
+        false
+    };
+    return indices.graphics_family.is_some() && swapchain_supported && device_extensions_supported;
 }
 
 pub fn find_queue_family(
@@ -158,4 +197,40 @@ pub fn find_queue_family(
         index += 1;
     }
     queue_family_indices
+}
+
+fn check_device_extension_support(
+    instance: &ash::Instance,
+    physical_device: ash::vk::PhysicalDevice,
+    device_extensions: &DeviceExtension,
+) -> bool {
+    let available_extensions = unsafe {
+        instance
+            .enumerate_device_extension_properties(physical_device)
+            .expect("Failed to get device extension properties.")
+    };
+
+    let mut available_extension_names = vec![];
+
+    println!("\tAvailable Device Extensions: ");
+    for extension in available_extensions.iter() {
+        let extension_name = vk_to_string(&extension.extension_name);
+        println!(
+            "\t\tName: {}, Version: {}",
+            extension_name, extension.spec_version
+        );
+
+        available_extension_names.push(extension_name);
+    }
+
+    let mut required_extensions = std::collections::HashSet::new();
+    for extension in device_extensions.names.iter() {
+        required_extensions.insert(extension.to_string());
+    }
+
+    for extension_name in available_extension_names.iter() {
+        required_extensions.remove(extension_name);
+    }
+
+    return required_extensions.is_empty();
 }

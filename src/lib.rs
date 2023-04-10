@@ -1,6 +1,5 @@
 use debug::{populate_debug_messenger_create_info, ValidationInfo};
-use helpers::vk_to_string;
-use queries::{QueueFamilyIndices, SurfaceData};
+use queries::QueueFamilyIndices;
 use std::{ffi::CString, os::raw::c_void, ptr};
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -16,6 +15,23 @@ pub const VALIDATION: ValidationInfo = ValidationInfo {
     required_validation_layers: ["VK_LAYER_KHRONOS_validation"],
 };
 
+const DEVICE_EXTENSIONS: queries::DeviceExtension = queries::DeviceExtension {
+    names: ["VK_KHR_swapchain"],
+};
+
+pub struct SurfaceData {
+    pub surface: ash::vk::SurfaceKHR,
+    pub surface_loader: ash::extensions::khr::Surface,
+}
+
+struct SwapChainData {
+    swapchain_loader: ash::extensions::khr::Swapchain,
+    swapchain: ash::vk::SwapchainKHR,
+    swapchain_images: Vec<ash::vk::Image>,
+    swapchain_format: ash::vk::Format,
+    swapchain_extent: ash::vk::Extent2D,
+}
+
 pub struct Renderer {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -27,6 +43,11 @@ pub struct Renderer {
     device: ash::Device,
     _gfx_queue: ash::vk::Queue,
     _present_queue: ash::vk::Queue,
+    swapchain_loader: ash::extensions::khr::Swapchain,
+    swapchain: ash::vk::SwapchainKHR,
+    swapchain_images: Vec<ash::vk::Image>,
+    swapchain_format: ash::vk::Format,
+    swapchain_extent: ash::vk::Extent2D,
 }
 
 impl Renderer {
@@ -45,7 +66,8 @@ impl Renderer {
             let (device, indices) = Renderer::create_logical_device(&instance, gpu, &surface_data);
             let gfx_queue = device.get_device_queue(indices.graphics_family.unwrap(), 0);
             let present_queue = device.get_device_queue(indices.present_family.unwrap(), 0);
-
+            let swapchain_data =
+                Renderer::create_swap_chain(&instance, &device, gpu, &surface_data, &indices);
             Renderer {
                 _entry: entry,
                 instance,
@@ -57,6 +79,11 @@ impl Renderer {
                 _present_queue: present_queue,
                 surface: surface_data.surface,
                 surface_loader: surface_data.surface_loader,
+                swapchain: swapchain_data.swapchain,
+                swapchain_loader: swapchain_data.swapchain_loader,
+                swapchain_images: swapchain_data.swapchain_images,
+                swapchain_format: swapchain_data.swapchain_format,
+                swapchain_extent: swapchain_data.swapchain_extent,
             }
         }
     }
@@ -69,7 +96,7 @@ impl Renderer {
             .expect("Failed to create window.")
     }
 
-    pub fn main_loop(mut self, window: winit::window::Window, event_loop: EventLoop<()>) {
+    pub fn main_loop(self, window: winit::window::Window, event_loop: EventLoop<()>) {
         event_loop.run(move |event, _, control_flow| match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
@@ -94,17 +121,19 @@ impl Renderer {
     }
 
     fn create_instance(entry: &ash::Entry) -> ash::Instance {
+        let application_name = CString::new("Sapfire").unwrap();
+        let engine_name = CString::new("Sapfire Engine").unwrap();
         let app_info = ash::vk::ApplicationInfo {
             api_version: ash::vk::API_VERSION_1_0,
             engine_version: 0,
             s_type: ash::vk::StructureType::APPLICATION_INFO,
             p_next: ptr::null(),
-            p_application_name: CString::new("Sapfire").unwrap().as_ptr(),
-            p_engine_name: CString::new("Sapfire Engine").unwrap().as_ptr(),
+            p_application_name: application_name.as_ptr(),
+            p_engine_name: engine_name.as_ptr(),
             application_version: 0,
         };
         let debug_utils_create_info = populate_debug_messenger_create_info();
-        let extension_names = required_extension_names();
+        let extension_names = required_instance_extension_names();
         let required_validation_names_raw: Vec<CString> = VALIDATION
             .required_validation_layers
             .iter()
@@ -155,7 +184,7 @@ impl Renderer {
         unique_families.insert(indices.graphics_family);
         unique_families.insert(indices.present_family);
         let q_prios = [1.0_f32];
-        let extension_names = required_extension_names_queue();
+        let extension_names = required_device_extension_names();
         let mut q_create_infos = vec![];
         for &q_fam in unique_families.iter() {
             let queue_create_info = ash::vk::DeviceQueueCreateInfo {
@@ -218,6 +247,70 @@ impl Renderer {
         }
     }
 
+    fn create_swap_chain(
+        instance: &ash::Instance,
+        device: &ash::Device,
+        physical_device: ash::vk::PhysicalDevice,
+        surface_data: &SurfaceData,
+        queue_family: &QueueFamilyIndices,
+    ) -> SwapChainData {
+        let swapchain_support = queries::query_swapchain_support(physical_device, surface_data);
+        let surface_format = Renderer::pick_swapchain_format(&swapchain_support.formats);
+        let present_mode = Renderer::pick_swapchain_present_mode(&swapchain_support.present_modes);
+        let extent = Renderer::pick_swapchain_extent(&swapchain_support.capabilities);
+        let (image_sharing_mode, queue_family_index_count, queue_family_indexes) =
+            if queue_family.graphics_family != queue_family.present_family {
+                (
+                    ash::vk::SharingMode::CONCURRENT,
+                    2,
+                    vec![
+                        queue_family.graphics_family.unwrap(),
+                        queue_family.present_family.unwrap(),
+                    ],
+                )
+            } else {
+                (ash::vk::SharingMode::EXCLUSIVE, 0, vec![])
+            };
+        let swapchain_create_info = ash::vk::SwapchainCreateInfoKHR {
+            s_type: ash::vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
+            surface: surface_data.surface,
+            min_image_count: swapchain_support.capabilities.min_image_count + 1,
+            p_next: ptr::null(),
+            flags: ash::vk::SwapchainCreateFlagsKHR::empty(),
+            image_format: surface_format.format,
+            image_color_space: surface_format.color_space,
+            image_extent: extent,
+            image_array_layers: 1,
+            image_usage: ash::vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            image_sharing_mode,
+            queue_family_index_count,
+            p_queue_family_indices: queue_family_indexes.as_ptr(),
+            pre_transform: swapchain_support.capabilities.current_transform,
+            composite_alpha: ash::vk::CompositeAlphaFlagsKHR::OPAQUE,
+            present_mode,
+            clipped: ash::vk::TRUE,
+            old_swapchain: ash::vk::SwapchainKHR::null(),
+        };
+        let swapchain_loader = ash::extensions::khr::Swapchain::new(instance, device);
+        let swapchain = unsafe {
+            swapchain_loader
+                .create_swapchain(&swapchain_create_info, None)
+                .expect("Failed to create swapchain!")
+        };
+        let swapchain_images = unsafe {
+            swapchain_loader
+                .get_swapchain_images(swapchain)
+                .expect("Failed to get swapchain images")
+        };
+        SwapChainData {
+            swapchain_loader,
+            swapchain,
+            swapchain_images,
+            swapchain_format: surface_format.format,
+            swapchain_extent: extent,
+        }
+    }
+
     fn setup_debug_utils(
         entry: &ash::Entry,
         instance: &ash::Instance,
@@ -251,7 +344,12 @@ impl Renderer {
         println!("Found {} physical devices", physical_devices.len());
         let mut result = None;
         for &device in physical_devices.iter() {
-            if queries::is_physical_device_suitable(instance, device, surface_data) {
+            if queries::is_physical_device_suitable(
+                instance,
+                device,
+                surface_data,
+                &DEVICE_EXTENSIONS,
+            ) {
                 if result == None {
                     result = Some(device)
                 }
@@ -260,6 +358,44 @@ impl Renderer {
         match result {
             None => panic!("Failed to find a suitable GPU"),
             Some(device) => device,
+        }
+    }
+
+    fn pick_swapchain_format(
+        formats: &Vec<ash::vk::SurfaceFormatKHR>,
+    ) -> ash::vk::SurfaceFormatKHR {
+        *formats
+            .iter()
+            .find(|&&fmt| {
+                fmt.format == ash::vk::Format::B8G8R8A8_SRGB
+                    && fmt.color_space == ash::vk::ColorSpaceKHR::SRGB_NONLINEAR
+            })
+            .unwrap_or(&formats.first().unwrap().clone())
+    }
+
+    fn pick_swapchain_present_mode(
+        available_present_modes: &Vec<ash::vk::PresentModeKHR>,
+    ) -> ash::vk::PresentModeKHR {
+        *available_present_modes
+            .iter()
+            .find(|&&mode| mode == ash::vk::PresentModeKHR::MAILBOX)
+            .unwrap_or(&ash::vk::PresentModeKHR::FIFO)
+    }
+
+    fn pick_swapchain_extent(capabilities: &ash::vk::SurfaceCapabilitiesKHR) -> ash::vk::Extent2D {
+        if capabilities.current_extent.width != u32::max_value() {
+            capabilities.current_extent
+        } else {
+            ash::vk::Extent2D {
+                width: WINDOW_WIDTH.clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: WINDOW_HEIGHT.clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            }
         }
     }
 }
@@ -278,7 +414,7 @@ impl Drop for Renderer {
 }
 
 #[cfg(target_os = "macos")]
-pub fn required_extension_names() -> Vec<*const i8> {
+pub fn required_instance_extension_names() -> Vec<*const i8> {
     vec![
         ash::extensions::khr::Surface::name().as_ptr(),
         ash::extensions::mvk::MacOSSurface::name().as_ptr(),
@@ -289,12 +425,15 @@ pub fn required_extension_names() -> Vec<*const i8> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn required_extension_names_queue() -> Vec<*const i8> {
-    vec![ash::vk::KhrPortabilitySubsetFn::name().as_ptr()]
+pub fn required_device_extension_names() -> Vec<*const i8> {
+    vec![
+        ash::vk::KhrPortabilitySubsetFn::name().as_ptr(),
+        ash::vk::KhrSwapchainFn::name().as_ptr(),
+    ]
 }
 
 #[cfg(all(windows))]
-pub fn required_extension_names() -> Vec<*const i8> {
+pub fn required_instance_extension_names() -> Vec<*const i8> {
     vec![
         Surface::name().as_ptr(),
         Win32Surface::name().as_ptr(),
@@ -303,7 +442,7 @@ pub fn required_extension_names() -> Vec<*const i8> {
 }
 
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
-pub fn required_extension_names() -> Vec<*const i8> {
+pub fn required_instance_extension_names() -> Vec<*const i8> {
     vec![
         Surface::name().as_ptr(),
         XlibSurface::name().as_ptr(),
