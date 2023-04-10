@@ -16,20 +16,29 @@ pub const VALIDATION: ValidationInfo = ValidationInfo {
 
 struct QueueFamilyIndices {
     pub graphics_family: Option<u32>,
+    pub present_family: Option<u32>,
+}
+
+struct SurfaceData {
+    pub surface: ash::vk::SurfaceKHR,
+    pub surface_loader: ash::extensions::khr::Surface,
 }
 
 pub struct Renderer {
     _entry: ash::Entry,
     instance: ash::Instance,
+    surface: ash::vk::SurfaceKHR,
+    surface_loader: ash::extensions::khr::Surface,
     debug_utils_loader: ash::extensions::ext::DebugUtils,
     debug_messenger: ash::vk::DebugUtilsMessengerEXT,
     _gpu: ash::vk::PhysicalDevice,
     device: ash::Device,
     _gfx_queue: ash::vk::Queue,
+    _present_queue: ash::vk::Queue,
 }
 
 impl Renderer {
-    pub fn new() -> Renderer {
+    pub fn new(window: &winit::window::Window) -> Renderer {
         // init vulkan stuff
         unsafe {
             let entry = ash::Entry::load().unwrap();
@@ -39,8 +48,12 @@ impl Renderer {
             let instance = Renderer::create_instance(&entry);
             let (debug_utils_loader, debug_messenger) =
                 Renderer::setup_debug_utils(&entry, &instance);
-            let gpu = Renderer::pick_suitable_physical_device(&instance);
-            let (device, gfx_queue) = Renderer::create_logical_device(&instance, gpu);
+            let surface_data = Renderer::create_surface(&entry, &instance, window);
+            let gpu = Renderer::pick_suitable_physical_device(&instance, &surface_data);
+            let (device, indices) = Renderer::create_logical_device(&instance, gpu, &surface_data);
+            let gfx_queue = device.get_device_queue(indices.graphics_family.unwrap(), 0);
+            let present_queue = device.get_device_queue(indices.present_family.unwrap(), 0);
+
             Renderer {
                 _entry: entry,
                 instance,
@@ -49,11 +62,46 @@ impl Renderer {
                 _gpu: gpu,
                 device,
                 _gfx_queue: gfx_queue,
+                _present_queue: present_queue,
+                surface: surface_data.surface,
+                surface_loader: surface_data.surface_loader,
             }
         }
     }
 
-    pub fn create_instance(entry: &ash::Entry) -> ash::Instance {
+    pub fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
+        winit::window::WindowBuilder::new()
+            .with_title("Sapfire Renderer")
+            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
+            .build(event_loop)
+            .expect("Failed to create window.")
+    }
+
+    pub fn main_loop(mut self, window: winit::window::Window, event_loop: EventLoop<()>) {
+        event_loop.run(move |event, _, control_flow| match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::KeyboardInput { input, .. } => match input {
+                    KeyboardInput {
+                        virtual_keycode,
+                        state,
+                        ..
+                    } => match (virtual_keycode, state) {
+                        (Some(VirtualKeyCode::Escape), ElementState::Pressed) => {
+                            *control_flow = ControlFlow::Exit
+                        }
+                        _ => {}
+                    },
+                },
+                _ => {}
+            },
+            Event::RedrawEventsCleared => window.request_redraw(),
+
+            _ => (),
+        })
+    }
+
+    fn create_instance(entry: &ash::Entry) -> ash::Instance {
         let app_info = ash::vk::ApplicationInfo {
             api_version: ash::vk::API_VERSION_1_0,
             engine_version: 0,
@@ -105,53 +153,30 @@ impl Renderer {
         instance
     }
 
-    pub fn init_window(event_loop: &EventLoop<()>) -> winit::window::Window {
-        winit::window::WindowBuilder::new()
-            .with_title("Sapfire Renderer")
-            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .build(event_loop)
-            .expect("Failed to create window.")
-    }
-
-    pub fn main_loop(mut self, window: winit::window::Window, event_loop: EventLoop<()>) {
-        event_loop.run(move |event, _, control_flow| match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
-                WindowEvent::KeyboardInput { input, .. } => match input {
-                    KeyboardInput {
-                        virtual_keycode,
-                        state,
-                        ..
-                    } => match (virtual_keycode, state) {
-                        (Some(VirtualKeyCode::Escape), ElementState::Pressed) => {
-                            *control_flow = ControlFlow::Exit
-                        }
-                        _ => {}
-                    },
-                },
-                _ => {}
-            },
-            Event::RedrawEventsCleared => window.request_redraw(),
-
-            _ => (),
-        })
-    }
-
     fn create_logical_device(
         instance: &ash::Instance,
         physical_device: ash::vk::PhysicalDevice,
-    ) -> (ash::Device, ash::vk::Queue) {
-        let indices = Renderer::find_queue_family(instance, physical_device);
+        surface_data: &SurfaceData,
+    ) -> (ash::Device, QueueFamilyIndices) {
+        let indices = Renderer::find_queue_family(instance, physical_device, surface_data);
+        let mut unique_families = std::collections::HashSet::new();
+        unique_families.insert(indices.graphics_family);
+        unique_families.insert(indices.present_family);
         let q_prios = [1.0_f32];
         let extension_names = required_extension_names_queue();
-        let queue_create_info = ash::vk::DeviceQueueCreateInfo {
-            s_type: ash::vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
-            flags: ash::vk::DeviceQueueCreateFlags::empty(),
-            p_next: ptr::null(),
-            p_queue_priorities: q_prios.as_ptr(),
-            queue_count: q_prios.len() as u32,
-            queue_family_index: indices.graphics_family.unwrap(),
-        };
+        let mut q_create_infos = vec![];
+        for &q_fam in unique_families.iter() {
+            let queue_create_info = ash::vk::DeviceQueueCreateInfo {
+                s_type: ash::vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
+                flags: ash::vk::DeviceQueueCreateFlags::empty(),
+                p_next: ptr::null(),
+                p_queue_priorities: q_prios.as_ptr(),
+                queue_count: q_prios.len() as u32,
+                queue_family_index: q_fam.unwrap(),
+            };
+            q_create_infos.push(queue_create_info);
+        }
+
         let gpu_device_features = ash::vk::PhysicalDeviceFeatures {
             ..Default::default()
         };
@@ -175,18 +200,30 @@ impl Renderer {
             pp_enabled_extension_names: extension_names.as_ptr(),
             enabled_extension_count: extension_names.len() as u32,
             p_enabled_features: &gpu_device_features,
-            p_queue_create_infos: &queue_create_info,
-            queue_create_info_count: 1,
+            p_queue_create_infos: q_create_infos.as_ptr(),
+            queue_create_info_count: q_create_infos.len() as u32,
             p_next: ptr::null(),
-            flags: ash::vk::DeviceCreateFlags::default(),
+            flags: ash::vk::DeviceCreateFlags::empty(),
         };
         let device: ash::Device = unsafe {
             instance
                 .create_device(physical_device, &device_create_info, None)
                 .unwrap()
         };
-        let graphics_q = unsafe { device.get_device_queue(indices.graphics_family.unwrap(), 0) };
-        (device, graphics_q)
+        (device, indices)
+    }
+
+    fn create_surface(
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        window: &winit::window::Window,
+    ) -> SurfaceData {
+        let surface = unsafe { create_surface(entry, instance, window).unwrap() };
+        let surface_loader = ash::extensions::khr::Surface::new(entry, instance);
+        SurfaceData {
+            surface,
+            surface_loader,
+        }
     }
 
     fn setup_debug_utils(
@@ -210,7 +247,10 @@ impl Renderer {
         }
     }
 
-    fn pick_suitable_physical_device(instance: &ash::Instance) -> ash::vk::PhysicalDevice {
+    fn pick_suitable_physical_device(
+        instance: &ash::Instance,
+        surface_data: &SurfaceData,
+    ) -> ash::vk::PhysicalDevice {
         let physical_devices = unsafe {
             instance
                 .enumerate_physical_devices()
@@ -219,7 +259,7 @@ impl Renderer {
         println!("Found {} physical devices", physical_devices.len());
         let mut result = None;
         for &device in physical_devices.iter() {
-            if Renderer::is_physical_device_suitable(instance, device) {
+            if Renderer::is_physical_device_suitable(instance, device, surface_data) {
                 if result == None {
                     result = Some(device)
                 }
@@ -262,6 +302,7 @@ impl Renderer {
     fn is_physical_device_suitable(
         instance: &ash::Instance,
         physical_device: ash::vk::PhysicalDevice,
+        surface_data: &SurfaceData,
     ) -> bool {
         let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let device_features = unsafe { instance.get_physical_device_features(physical_device) };
@@ -336,7 +377,7 @@ impl Renderer {
                 "NO"
             }
         );
-        let indices = Renderer::find_queue_family(instance, physical_device);
+        let indices = Renderer::find_queue_family(instance, physical_device, surface_data);
 
         return indices.graphics_family.is_some();
     }
@@ -344,16 +385,36 @@ impl Renderer {
     fn find_queue_family(
         instance: &ash::Instance,
         physical_device: ash::vk::PhysicalDevice,
+        surface_data: &SurfaceData,
     ) -> QueueFamilyIndices {
         let queue_families =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let mut queue_family_indices = QueueFamilyIndices {
             graphics_family: None,
+            present_family: None,
         };
         let mut index = 0;
         for fam in queue_families {
             if fam.queue_count > 0 && fam.queue_flags.contains(ash::vk::QueueFlags::GRAPHICS) {
                 queue_family_indices.graphics_family = Some(index);
+            }
+            let present_supported = unsafe {
+                surface_data
+                    .surface_loader
+                    .get_physical_device_surface_support(
+                        physical_device,
+                        index as u32,
+                        surface_data.surface,
+                    )
+                    .unwrap()
+            };
+            if fam.queue_count > 0 && present_supported {
+                queue_family_indices.present_family = Some(index);
+            }
+
+            if queue_family_indices.graphics_family.is_some()
+                && queue_family_indices.present_family.is_some()
+            {
                 break;
             }
             index += 1;
@@ -407,4 +468,87 @@ pub fn required_extension_names() -> Vec<*const i8> {
         XlibSurface::name().as_ptr(),
         DebugUtils::name().as_ptr(),
     ]
+}
+
+#[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
+pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    window: &winit::window::Window,
+) -> Result<vk::SurfaceKHR, vk::Result> {
+    use std::ptr;
+    use winit::platform::unix::WindowExtUnix;
+
+    let x11_display = window.xlib_display().unwrap();
+    let x11_window = window.xlib_window().unwrap();
+    let x11_create_info = vk::XlibSurfaceCreateInfoKHR {
+        s_type: vk::StructureType::XLIB_SURFACE_CREATE_INFO_KHR,
+        p_next: ptr::null(),
+        flags: Default::default(),
+        window: x11_window as vk::Window,
+        dpy: x11_display as *mut vk::Display,
+    };
+    let xlib_surface_loader = XlibSurface::new(entry, instance);
+    xlib_surface_loader.create_xlib_surface(&x11_create_info, None)
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn create_surface(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    window: &winit::window::Window,
+) -> Result<ash::vk::SurfaceKHR, ash::vk::Result> {
+    use cocoa::appkit::{NSView, NSWindow};
+    use cocoa::base::id as cocoa_id;
+    use objc::runtime::YES;
+    use std::mem;
+    use winit::platform::macos::WindowExtMacOS;
+    let wnd: cocoa_id = mem::transmute(window.ns_window());
+
+    let layer = metal::MetalLayer::new();
+
+    layer.set_edge_antialiasing_mask(0);
+    layer.set_presents_with_transaction(false);
+    layer.remove_all_animations();
+
+    let view = wnd.contentView();
+
+    layer.set_contents_scale(view.backingScaleFactor());
+    view.setLayer(mem::transmute(layer.as_ref()));
+    view.setWantsLayer(YES);
+
+    let create_info = ash::vk::MacOSSurfaceCreateInfoMVK {
+        s_type: ash::vk::StructureType::MACOS_SURFACE_CREATE_INFO_MVK,
+        p_next: ptr::null(),
+        flags: Default::default(),
+        p_view: window.ns_view() as *const c_void,
+    };
+
+    let macos_surface_loader = ash::extensions::mvk::MacOSSurface::new(entry, instance);
+    macos_surface_loader.create_mac_os_surface(&create_info, None)
+}
+
+#[cfg(target_os = "windows")]
+pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    window: &winit::window::Window,
+) -> Result<vk::SurfaceKHR, vk::Result> {
+    use std::os::raw::c_void;
+    use std::ptr;
+    use winapi::shared::windef::HWND;
+    use winapi::um::libloaderapi::GetModuleHandleW;
+    use winit::platform::windows::WindowExtWindows;
+
+    let hwnd = window.hwnd() as HWND;
+    let hinstance = GetModuleHandleW(ptr::null()) as *const c_void;
+    let win32_create_info = vk::Win32SurfaceCreateInfoKHR {
+        s_type: vk::StructureType::WIN32_SURFACE_CREATE_INFO_KHR,
+        p_next: ptr::null(),
+        flags: Default::default(),
+        hinstance,
+        hwnd: hwnd as *const c_void,
+    };
+    let win32_surface_loader = Win32Surface::new(entry, instance);
+    win32_surface_loader.create_win32_surface(&win32_create_info, None)
 }
