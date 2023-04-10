@@ -14,11 +14,16 @@ pub const VALIDATION: ValidationInfo = ValidationInfo {
     required_validation_layers: ["VK_LAYER_KHRONOS_validation"],
 };
 
+struct QueueFamilyIndices {
+    pub graphics_family: Option<u32>,
+}
+
 pub struct Renderer {
     _entry: ash::Entry,
     instance: ash::Instance,
     debug_utils_loader: ash::extensions::ext::DebugUtils,
     debug_messenger: ash::vk::DebugUtilsMessengerEXT,
+    _gpu: ash::vk::PhysicalDevice,
 }
 
 impl Renderer {
@@ -32,11 +37,13 @@ impl Renderer {
             let instance = Renderer::create_instance(&entry);
             let (debug_utils_loader, debug_messenger) =
                 Renderer::setup_debug_utils(&entry, &instance);
+            let gpu = Renderer::pick_suitable_physical_device(&instance);
             Renderer {
                 _entry: entry,
                 instance,
                 debug_utils_loader,
                 debug_messenger,
+                _gpu: gpu,
             }
         }
     }
@@ -82,7 +89,7 @@ impl Renderer {
                 ptr::null()
             },
             s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
-            flags: ash::vk::InstanceCreateFlags::empty(),
+            flags: ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
             p_application_info: &app_info,
         };
         let instance: ash::Instance = unsafe {
@@ -101,7 +108,7 @@ impl Renderer {
             .expect("Failed to create window.")
     }
 
-    pub fn main_loop(window: winit::window::Window, event_loop: EventLoop<()>) {
+    pub fn main_loop(mut self, window: winit::window::Window, event_loop: EventLoop<()>) {
         event_loop.run(move |event, _, control_flow| match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
@@ -146,6 +153,27 @@ impl Renderer {
         }
     }
 
+    fn pick_suitable_physical_device(instance: &ash::Instance) -> ash::vk::PhysicalDevice {
+        let physical_devices = unsafe {
+            instance
+                .enumerate_physical_devices()
+                .expect("Failed to enumerate physical devices")
+        };
+        println!("Found {} physical devices", physical_devices.len());
+        let mut result = None;
+        for &device in physical_devices.iter() {
+            if Renderer::is_physical_device_suitable(instance, device) {
+                if result == None {
+                    result = Some(device)
+                }
+            }
+        }
+        match result {
+            None => panic!("Failed to find a suitable GPU"),
+            Some(device) => device,
+        }
+    }
+
     fn check_validation_layer_support(entry: &ash::Entry) -> bool {
         let layer_props = entry
             .enumerate_instance_layer_properties()
@@ -173,6 +201,108 @@ impl Renderer {
         }
         true
     }
+
+    fn is_physical_device_suitable(
+        instance: &ash::Instance,
+        physical_device: ash::vk::PhysicalDevice,
+    ) -> bool {
+        let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let device_features = unsafe { instance.get_physical_device_features(physical_device) };
+        let device_queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let device_type = match device_properties.device_type {
+            ash::vk::PhysicalDeviceType::CPU => "Cpu",
+            ash::vk::PhysicalDeviceType::INTEGRATED_GPU => "Integrated GPU",
+            ash::vk::PhysicalDeviceType::DISCRETE_GPU => "Discrete GPU",
+            ash::vk::PhysicalDeviceType::VIRTUAL_GPU => "Virtual GPU",
+            ash::vk::PhysicalDeviceType::OTHER => "Unknown",
+            _ => panic!(),
+        };
+        let device_name = vk_to_string(&device_properties.device_name);
+        println!(
+            "\tDevice Name: {}, id: {}, type: {}",
+            device_name, device_properties.device_id, device_type
+        );
+        let vmajor = ash::vk::api_version_major(device_properties.api_version);
+        let vminor = ash::vk::api_version_minor(device_properties.api_version);
+        let vpatch = ash::vk::api_version_patch(device_properties.api_version);
+        println!("\tAPI Version: {}.{}.{}", vmajor, vminor, vpatch);
+        println!("\tSupport Queue Family: {}", device_queue_families.len());
+        println!("\t\tQueue Count | Graphics, Compute, Transfer, Sparse Binding");
+        for queue_family in device_queue_families.iter() {
+            let is_graphics_support = if queue_family
+                .queue_flags
+                .contains(ash::vk::QueueFlags::GRAPHICS)
+            {
+                "support"
+            } else {
+                "unsupport"
+            };
+            let is_compute_support = if queue_family
+                .queue_flags
+                .contains(ash::vk::QueueFlags::COMPUTE)
+            {
+                "support"
+            } else {
+                "unsupport"
+            };
+            let is_transfer_support = if queue_family
+                .queue_flags
+                .contains(ash::vk::QueueFlags::TRANSFER)
+            {
+                "support"
+            } else {
+                "unsupport"
+            };
+            let is_sparse_support = if queue_family
+                .queue_flags
+                .contains(ash::vk::QueueFlags::SPARSE_BINDING)
+            {
+                "support"
+            } else {
+                "unsupport"
+            };
+            println!(
+                "\t\t{}\t    | {},  {},  {},  {}",
+                queue_family.queue_count,
+                is_graphics_support,
+                is_compute_support,
+                is_transfer_support,
+                is_sparse_support
+            );
+        }
+        println!(
+            "\tGeometry Shader support: {}",
+            if device_features.geometry_shader == 1 {
+                "Support"
+            } else {
+                "Unsupport"
+            }
+        );
+        let indices = Renderer::find_queue_family(instance, physical_device);
+
+        return indices.graphics_family.is_some();
+    }
+
+    fn find_queue_family(
+        instance: &ash::Instance,
+        physical_device: ash::vk::PhysicalDevice,
+    ) -> QueueFamilyIndices {
+        let queue_families =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let mut queue_family_indices = QueueFamilyIndices {
+            graphics_family: None,
+        };
+        let mut index = 0;
+        for fam in queue_families {
+            if fam.queue_count > 0 && fam.queue_flags.contains(ash::vk::QueueFlags::GRAPHICS) {
+                queue_family_indices.graphics_family = Some(index);
+                break;
+            }
+            index += 1;
+        }
+        queue_family_indices
+    }
 }
 
 impl Drop for Renderer {
@@ -193,6 +323,7 @@ pub fn required_extension_names() -> Vec<*const i8> {
         ash::extensions::khr::Surface::name().as_ptr(),
         ash::extensions::mvk::MacOSSurface::name().as_ptr(),
         ash::extensions::ext::DebugUtils::name().as_ptr(),
+        ash::vk::KhrPortabilityEnumerationFn::name().as_ptr(),
     ]
 }
 
