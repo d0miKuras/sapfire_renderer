@@ -24,6 +24,8 @@ pub struct Renderer {
     debug_utils_loader: ash::extensions::ext::DebugUtils,
     debug_messenger: ash::vk::DebugUtilsMessengerEXT,
     _gpu: ash::vk::PhysicalDevice,
+    device: ash::Device,
+    _gfx_queue: ash::vk::Queue,
 }
 
 impl Renderer {
@@ -38,12 +40,15 @@ impl Renderer {
             let (debug_utils_loader, debug_messenger) =
                 Renderer::setup_debug_utils(&entry, &instance);
             let gpu = Renderer::pick_suitable_physical_device(&instance);
+            let (device, gfx_queue) = Renderer::create_logical_device(&instance, gpu);
             Renderer {
                 _entry: entry,
                 instance,
                 debug_utils_loader,
                 debug_messenger,
                 _gpu: gpu,
+                device,
+                _gfx_queue: gfx_queue,
             }
         }
     }
@@ -130,6 +135,58 @@ impl Renderer {
 
             _ => (),
         })
+    }
+
+    fn create_logical_device(
+        instance: &ash::Instance,
+        physical_device: ash::vk::PhysicalDevice,
+    ) -> (ash::Device, ash::vk::Queue) {
+        let indices = Renderer::find_queue_family(instance, physical_device);
+        let q_prios = [1.0_f32];
+        let extension_names = required_extension_names_queue();
+        let queue_create_info = ash::vk::DeviceQueueCreateInfo {
+            s_type: ash::vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
+            flags: ash::vk::DeviceQueueCreateFlags::empty(),
+            p_next: ptr::null(),
+            p_queue_priorities: q_prios.as_ptr(),
+            queue_count: q_prios.len() as u32,
+            queue_family_index: indices.graphics_family.unwrap(),
+        };
+        let gpu_device_features = ash::vk::PhysicalDeviceFeatures {
+            ..Default::default()
+        };
+        let required_validation_names_raw: Vec<CString> = VALIDATION
+            .required_validation_layers
+            .iter()
+            .map(|name| CString::new(*name).unwrap())
+            .collect();
+        let enabled_layer_names: Vec<*const i8> = required_validation_names_raw
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect();
+        let device_create_info = ash::vk::DeviceCreateInfo {
+            s_type: ash::vk::StructureType::DEVICE_CREATE_INFO,
+            enabled_layer_count: enabled_layer_names.len() as u32,
+            pp_enabled_layer_names: if VALIDATION.is_enabled {
+                enabled_layer_names.as_ptr()
+            } else {
+                ptr::null()
+            },
+            pp_enabled_extension_names: extension_names.as_ptr(),
+            enabled_extension_count: extension_names.len() as u32,
+            p_enabled_features: &gpu_device_features,
+            p_queue_create_infos: &queue_create_info,
+            queue_create_info_count: 1,
+            p_next: ptr::null(),
+            flags: ash::vk::DeviceCreateFlags::default(),
+        };
+        let device: ash::Device = unsafe {
+            instance
+                .create_device(physical_device, &device_create_info, None)
+                .unwrap()
+        };
+        let graphics_q = unsafe { device.get_device_queue(indices.graphics_family.unwrap(), 0) };
+        (device, graphics_q)
     }
 
     fn setup_debug_utils(
@@ -227,43 +284,43 @@ impl Renderer {
         let vminor = ash::vk::api_version_minor(device_properties.api_version);
         let vpatch = ash::vk::api_version_patch(device_properties.api_version);
         println!("\tAPI Version: {}.{}.{}", vmajor, vminor, vpatch);
-        println!("\tSupport Queue Family: {}", device_queue_families.len());
+        println!("\tYES Queue Family: {}", device_queue_families.len());
         println!("\t\tQueue Count | Graphics, Compute, Transfer, Sparse Binding");
         for queue_family in device_queue_families.iter() {
             let is_graphics_support = if queue_family
                 .queue_flags
                 .contains(ash::vk::QueueFlags::GRAPHICS)
             {
-                "support"
+                "YES"
             } else {
-                "unsupport"
+                "NO"
             };
             let is_compute_support = if queue_family
                 .queue_flags
                 .contains(ash::vk::QueueFlags::COMPUTE)
             {
-                "support"
+                "YES"
             } else {
-                "unsupport"
+                "NO"
             };
             let is_transfer_support = if queue_family
                 .queue_flags
                 .contains(ash::vk::QueueFlags::TRANSFER)
             {
-                "support"
+                "YES"
             } else {
-                "unsupport"
+                "NO"
             };
             let is_sparse_support = if queue_family
                 .queue_flags
                 .contains(ash::vk::QueueFlags::SPARSE_BINDING)
             {
-                "support"
+                "YES"
             } else {
-                "unsupport"
+                "NO"
             };
             println!(
-                "\t\t{}\t    | {},  {},  {},  {}",
+                "\t\t{}\t    | {},\t  {},\t  {},\t  {}",
                 queue_family.queue_count,
                 is_graphics_support,
                 is_compute_support,
@@ -272,11 +329,11 @@ impl Renderer {
             );
         }
         println!(
-            "\tGeometry Shader support: {}",
+            "\tGeometry Shader YES: {}",
             if device_features.geometry_shader == 1 {
-                "Support"
+                "YES"
             } else {
-                "Unsupport"
+                "NO"
             }
         );
         let indices = Renderer::find_queue_family(instance, physical_device);
@@ -324,7 +381,13 @@ pub fn required_extension_names() -> Vec<*const i8> {
         ash::extensions::mvk::MacOSSurface::name().as_ptr(),
         ash::extensions::ext::DebugUtils::name().as_ptr(),
         ash::vk::KhrPortabilityEnumerationFn::name().as_ptr(),
+        ash::vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
     ]
+}
+
+#[cfg(target_os = "macos")]
+pub fn required_extension_names_queue() -> Vec<*const i8> {
+    vec![ash::vk::KhrPortabilitySubsetFn::name().as_ptr()]
 }
 
 #[cfg(all(windows))]
