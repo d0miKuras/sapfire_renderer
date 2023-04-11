@@ -403,6 +403,9 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+            self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
