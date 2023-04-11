@@ -48,6 +48,7 @@ pub struct Renderer {
     swapchain_images: Vec<ash::vk::Image>,
     swapchain_format: ash::vk::Format,
     swapchain_extent: ash::vk::Extent2D,
+    swapchain_imageviews: Vec<ash::vk::ImageView>,
 }
 
 impl Renderer {
@@ -68,6 +69,11 @@ impl Renderer {
             let present_queue = device.get_device_queue(indices.present_family.unwrap(), 0);
             let swapchain_data =
                 Renderer::create_swap_chain(&instance, &device, gpu, &surface_data, &indices);
+            let swapchain_imageviews = Renderer::create_image_views(
+                &device,
+                swapchain_data.swapchain_format,
+                &swapchain_data.swapchain_images,
+            );
             Renderer {
                 _entry: entry,
                 instance,
@@ -84,6 +90,7 @@ impl Renderer {
                 swapchain_images: swapchain_data.swapchain_images,
                 swapchain_format: swapchain_data.swapchain_format,
                 swapchain_extent: swapchain_data.swapchain_extent,
+                swapchain_imageviews,
             }
         }
     }
@@ -311,6 +318,44 @@ impl Renderer {
         }
     }
 
+    fn create_image_views(
+        device: &ash::Device,
+        swapchain_format: ash::vk::Format,
+        swapchain_images: &Vec<ash::vk::Image>,
+    ) -> Vec<ash::vk::ImageView> {
+        let mut image_views = vec![];
+        for &image in swapchain_images {
+            let imageview_create_info = ash::vk::ImageViewCreateInfo {
+                s_type: ash::vk::StructureType::IMAGE_VIEW_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: ash::vk::ImageViewCreateFlags::empty(),
+                image,
+                format: swapchain_format,
+                view_type: ash::vk::ImageViewType::TYPE_2D,
+                components: ash::vk::ComponentMapping {
+                    a: ash::vk::ComponentSwizzle::IDENTITY,
+                    r: ash::vk::ComponentSwizzle::IDENTITY,
+                    g: ash::vk::ComponentSwizzle::IDENTITY,
+                    b: ash::vk::ComponentSwizzle::IDENTITY,
+                },
+                subresource_range: ash::vk::ImageSubresourceRange {
+                    aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+            };
+            let image_view = unsafe {
+                device
+                    .create_image_view(&imageview_create_info, None)
+                    .expect("Failed to create image view")
+            };
+            image_views.push(image_view);
+        }
+        image_views
+    }
+
     fn setup_debug_utils(
         entry: &ash::Entry,
         instance: &ash::Instance,
@@ -403,6 +448,9 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            self.swapchain_imageviews
+                .iter()
+                .for_each(|&view| self.device.destroy_image_view(view, None));
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
