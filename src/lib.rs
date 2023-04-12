@@ -150,6 +150,7 @@ impl Renderer {
             .iter()
             .map(|name| name.as_ptr())
             .collect();
+        #[cfg(target_os = "macos")]{
         let create_info = ash::vk::InstanceCreateInfo {
             enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
@@ -173,6 +174,31 @@ impl Renderer {
             flags: ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
             p_application_info: &app_info,
         };
+    }
+        #[cfg(target_os = "windows")]{
+        let create_info = ash::vk::InstanceCreateInfo {
+            enabled_extension_count: extension_names.len() as u32,
+            pp_enabled_extension_names: extension_names.as_ptr(),
+            enabled_layer_count: if VALIDATION.is_enabled {
+                enabled_layer_names.len() as u32
+            } else {
+                0
+            },
+            pp_enabled_layer_names: if VALIDATION.is_enabled {
+                enabled_layer_names.as_ptr()
+            } else {
+                ptr::null()
+            },
+            p_next: if VALIDATION.is_enabled {
+                &debug_utils_create_info as *const ash::vk::DebugUtilsMessengerCreateInfoEXT
+                    as *const c_void
+            } else {
+                ptr::null()
+            },
+            s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
+            flags: ash::vk::InstanceCreateFlags::empty(),
+            p_application_info: &app_info,
+        };
         let instance: ash::Instance = unsafe {
             entry
                 .create_instance(&create_info, None)
@@ -180,6 +206,7 @@ impl Renderer {
         };
         instance
     }
+}
 
     fn create_logical_device(
         instance: &ash::Instance,
@@ -484,11 +511,18 @@ pub fn required_device_extension_names() -> Vec<*const i8> {
 }
 
 #[cfg(all(windows))]
+pub fn required_device_extension_names() -> Vec<*const i8> {
+    vec![
+        ash::vk::KhrSwapchainFn::name().as_ptr(),
+    ]
+}
+
+#[cfg(all(windows))]
 pub fn required_instance_extension_names() -> Vec<*const i8> {
     vec![
-        Surface::name().as_ptr(),
-        Win32Surface::name().as_ptr(),
-        DebugUtils::name().as_ptr(),
+        ash::extensions::khr::Surface::name().as_ptr(),
+        ash::extensions::khr::Win32Surface::name().as_ptr(),
+        ash::extensions::ext::DebugUtils::name().as_ptr(),
     ]
 }
 
@@ -560,26 +594,24 @@ pub unsafe fn create_surface(
 }
 
 #[cfg(target_os = "windows")]
-pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
+pub unsafe fn create_surface(
     entry: &ash::Entry,
     instance: &ash::Instance,
     window: &winit::window::Window,
-) -> Result<vk::SurfaceKHR, vk::Result> {
-    use std::os::raw::c_void;
-    use std::ptr;
+) -> Result<ash::vk::SurfaceKHR, ash::vk::Result> {
     use winapi::shared::windef::HWND;
     use winapi::um::libloaderapi::GetModuleHandleW;
     use winit::platform::windows::WindowExtWindows;
 
     let hwnd = window.hwnd() as HWND;
     let hinstance = GetModuleHandleW(ptr::null()) as *const c_void;
-    let win32_create_info = vk::Win32SurfaceCreateInfoKHR {
-        s_type: vk::StructureType::WIN32_SURFACE_CREATE_INFO_KHR,
+    let win32_create_info = ash::vk::Win32SurfaceCreateInfoKHR {
+        s_type: ash::vk::StructureType::WIN32_SURFACE_CREATE_INFO_KHR,
         p_next: ptr::null(),
         flags: Default::default(),
         hinstance,
         hwnd: hwnd as *const c_void,
     };
-    let win32_surface_loader = Win32Surface::new(entry, instance);
+    let win32_surface_loader = ash::extensions::khr::Win32Surface::new(entry, instance);
     win32_surface_loader.create_win32_surface(&win32_create_info, None)
 }
