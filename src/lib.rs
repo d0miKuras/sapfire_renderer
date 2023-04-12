@@ -1,3 +1,4 @@
+use ash::vk;
 use debug::{populate_debug_messenger_create_info, ValidationInfo};
 use queries::QueueFamilyIndices;
 use std::{ffi::CString, os::raw::c_void, ptr};
@@ -9,7 +10,8 @@ mod queries;
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
-const VERTEX_SHADER: &str = "#version 450
+const VERTEX_SHADER: &str = "
+#version 450
 
 vec2 positions[3] = vec2[](
     vec2(0.0, -0.5),
@@ -30,7 +32,8 @@ void main() {
     fragColor = colors[gl_VertexIndex];
 }";
 
-const FRAGMENT_SHADER: &str = "#version 450
+const FRAGMENT_SHADER: &str = "
+#version 450
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 0) out vec4 outColor;
@@ -103,6 +106,7 @@ impl Renderer {
                 swapchain_data.swapchain_format,
                 &swapchain_data.swapchain_images,
             );
+            let _pipeline = Renderer::create_graphics_pipeline(&device);
             Renderer {
                 _entry: entry,
                 instance,
@@ -412,6 +416,77 @@ impl Renderer {
             image_views.push(image_view);
         }
         image_views
+    }
+
+    fn create_graphics_pipeline(device: &ash::Device) {
+        let compiler = shaderc::Compiler::new().unwrap(); // TODO: move shader compilation to its own function/module
+        let mut options = shaderc::CompileOptions::new().unwrap();
+        options.add_macro_definition("EP", Some("main"));
+        let vert_code = compiler
+            .compile_into_spirv(
+                VERTEX_SHADER,
+                shaderc::ShaderKind::Vertex,
+                "shader.glsl",
+                "main",
+                Some(&options),
+            )
+            .unwrap()
+            .as_binary_u8()
+            .to_vec();
+        let frag_code = compiler
+            .compile_into_spirv(
+                FRAGMENT_SHADER,
+                shaderc::ShaderKind::Fragment,
+                "shader.glsl",
+                "main",
+                Some(&options),
+            )
+            .unwrap()
+            .as_binary_u8()
+            .to_vec();
+        let vert_shader_module = Renderer::create_shader_module(device, vert_code);
+        let frag_shader_module = Renderer::create_shader_module(device, frag_code);
+        let main_function_name = CString::new("main").unwrap();
+        let _shader_staged = [
+            ash::vk::PipelineShaderStageCreateInfo {
+                s_type: ash::vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: ash::vk::PipelineShaderStageCreateFlags::empty(),
+                stage: ash::vk::ShaderStageFlags::VERTEX,
+                module: vert_shader_module,
+                p_name: main_function_name.as_ptr(),
+                p_specialization_info: ptr::null(),
+            },
+            ash::vk::PipelineShaderStageCreateInfo {
+                s_type: ash::vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: ash::vk::PipelineShaderStageCreateFlags::empty(),
+                stage: ash::vk::ShaderStageFlags::FRAGMENT,
+                module: frag_shader_module,
+                p_name: main_function_name.as_ptr(),
+                p_specialization_info: ptr::null(),
+            },
+        ];
+
+        unsafe {
+            device.destroy_shader_module(vert_shader_module, None);
+            device.destroy_shader_module(frag_shader_module, None);
+        }
+    }
+
+    fn create_shader_module(device: &ash::Device, code: Vec<u8>) -> ash::vk::ShaderModule {
+        let shader_module_create_info = ash::vk::ShaderModuleCreateInfo {
+            flags: ash::vk::ShaderModuleCreateFlags::empty(),
+            p_next: ptr::null(),
+            s_type: ash::vk::StructureType::SHADER_MODULE_CREATE_INFO,
+            code_size: code.len(),
+            p_code: code.as_ptr() as *const u32,
+        };
+        unsafe {
+            device
+                .create_shader_module(&shader_module_create_info, None)
+                .expect("Failed to create shader module")
+        }
     }
 
     fn setup_debug_utils(
