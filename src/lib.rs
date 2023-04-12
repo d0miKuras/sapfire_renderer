@@ -179,63 +179,65 @@ impl Renderer {
             .iter()
             .map(|name| name.as_ptr())
             .collect();
-        #[cfg(target_os = "macos")]{
-        let create_info = ash::vk::InstanceCreateInfo {
-            enabled_extension_count: extension_names.len() as u32,
-            pp_enabled_extension_names: extension_names.as_ptr(),
-            enabled_layer_count: if VALIDATION.is_enabled {
-                enabled_layer_names.len() as u32
-            } else {
-                0
-            },
-            pp_enabled_layer_names: if VALIDATION.is_enabled {
-                enabled_layer_names.as_ptr()
-            } else {
-                ptr::null()
-            },
-            p_next: if VALIDATION.is_enabled {
-                &debug_utils_create_info as *const ash::vk::DebugUtilsMessengerCreateInfoEXT
-                    as *const c_void
-            } else {
-                ptr::null()
-            },
-            s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
-            flags: ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
-            p_application_info: &app_info,
-        };
+        #[cfg(target_os = "macos")]
+        {
+            let create_info = ash::vk::InstanceCreateInfo {
+                enabled_extension_count: extension_names.len() as u32,
+                pp_enabled_extension_names: extension_names.as_ptr(),
+                enabled_layer_count: if VALIDATION.is_enabled {
+                    enabled_layer_names.len() as u32
+                } else {
+                    0
+                },
+                pp_enabled_layer_names: if VALIDATION.is_enabled {
+                    enabled_layer_names.as_ptr()
+                } else {
+                    ptr::null()
+                },
+                p_next: if VALIDATION.is_enabled {
+                    &debug_utils_create_info as *const ash::vk::DebugUtilsMessengerCreateInfoEXT
+                        as *const c_void
+                } else {
+                    ptr::null()
+                },
+                s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
+                flags: ash::vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
+                p_application_info: &app_info,
+            };
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            let create_info = ash::vk::InstanceCreateInfo {
+                enabled_extension_count: extension_names.len() as u32,
+                pp_enabled_extension_names: extension_names.as_ptr(),
+                enabled_layer_count: if VALIDATION.is_enabled {
+                    enabled_layer_names.len() as u32
+                } else {
+                    0
+                },
+                pp_enabled_layer_names: if VALIDATION.is_enabled {
+                    enabled_layer_names.as_ptr()
+                } else {
+                    ptr::null()
+                },
+                p_next: if VALIDATION.is_enabled {
+                    &debug_utils_create_info as *const ash::vk::DebugUtilsMessengerCreateInfoEXT
+                        as *const c_void
+                } else {
+                    ptr::null()
+                },
+                s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
+                flags: ash::vk::InstanceCreateFlags::empty(),
+                p_application_info: &app_info,
+            };
+            let instance: ash::Instance = unsafe {
+                entry
+                    .create_instance(&create_info, None)
+                    .expect("Failed to create Vulkan instance!")
+            };
+            instance
+        }
     }
-        #[cfg(target_os = "windows")]{
-        let create_info = ash::vk::InstanceCreateInfo {
-            enabled_extension_count: extension_names.len() as u32,
-            pp_enabled_extension_names: extension_names.as_ptr(),
-            enabled_layer_count: if VALIDATION.is_enabled {
-                enabled_layer_names.len() as u32
-            } else {
-                0
-            },
-            pp_enabled_layer_names: if VALIDATION.is_enabled {
-                enabled_layer_names.as_ptr()
-            } else {
-                ptr::null()
-            },
-            p_next: if VALIDATION.is_enabled {
-                &debug_utils_create_info as *const ash::vk::DebugUtilsMessengerCreateInfoEXT
-                    as *const c_void
-            } else {
-                ptr::null()
-            },
-            s_type: ash::vk::StructureType::INSTANCE_CREATE_INFO,
-            flags: ash::vk::InstanceCreateFlags::empty(),
-            p_application_info: &app_info,
-        };
-        let instance: ash::Instance = unsafe {
-            entry
-                .create_instance(&create_info, None)
-                .expect("Failed to create Vulkan instance!")
-        };
-        instance
-    }
-}
 
     fn create_logical_device(
         instance: &ash::Instance,
@@ -541,9 +543,12 @@ pub fn required_device_extension_names() -> Vec<*const i8> {
 
 #[cfg(all(windows))]
 pub fn required_device_extension_names() -> Vec<*const i8> {
-    vec![
-        ash::vk::KhrSwapchainFn::name().as_ptr(),
-    ]
+    vec![ash::vk::KhrSwapchainFn::name().as_ptr()]
+}
+
+#[cfg(all(unix))]
+pub fn required_device_extension_names() -> Vec<*const i8> {
+    vec![ash::vk::KhrSwapchainFn::name().as_ptr()]
 }
 
 #[cfg(all(windows))]
@@ -558,31 +563,29 @@ pub fn required_instance_extension_names() -> Vec<*const i8> {
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
 pub fn required_instance_extension_names() -> Vec<*const i8> {
     vec![
-        Surface::name().as_ptr(),
-        XlibSurface::name().as_ptr(),
-        DebugUtils::name().as_ptr(),
+        ash::extensions::khr::Surface::name().as_ptr(),
+        ash::extensions::khr::XlibSurface::name().as_ptr(),
+        ash::extensions::ext::DebugUtils::name().as_ptr(),
     ]
 }
 
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
-pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
+pub unsafe fn create_surface(
     entry: &ash::Entry,
     instance: &ash::Instance,
     window: &winit::window::Window,
-) -> Result<vk::SurfaceKHR, vk::Result> {
-    use std::ptr;
-    use winit::platform::unix::WindowExtUnix;
-
+) -> Result<ash::vk::SurfaceKHR, ash::vk::Result> {
+    use winit::platform::x11::WindowExtX11;
     let x11_display = window.xlib_display().unwrap();
     let x11_window = window.xlib_window().unwrap();
-    let x11_create_info = vk::XlibSurfaceCreateInfoKHR {
-        s_type: vk::StructureType::XLIB_SURFACE_CREATE_INFO_KHR,
+    let x11_create_info = ash::vk::XlibSurfaceCreateInfoKHR {
+        s_type: ash::vk::StructureType::XLIB_SURFACE_CREATE_INFO_KHR,
         p_next: ptr::null(),
         flags: Default::default(),
-        window: x11_window as vk::Window,
-        dpy: x11_display as *mut vk::Display,
+        window: x11_window as ash::vk::Window,
+        dpy: x11_display as *mut ash::vk::Display,
     };
-    let xlib_surface_loader = XlibSurface::new(entry, instance);
+    let xlib_surface_loader = ash::extensions::khr::XlibSurface::new(entry, instance);
     xlib_surface_loader.create_xlib_surface(&x11_create_info, None)
 }
 
