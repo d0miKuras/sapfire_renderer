@@ -81,6 +81,7 @@ pub struct Renderer {
     swapchain_format: ash::vk::Format,
     swapchain_extent: ash::vk::Extent2D,
     swapchain_imageviews: Vec<ash::vk::ImageView>,
+    pipeline_layout: ash::vk::PipelineLayout,
 }
 
 impl Renderer {
@@ -106,7 +107,8 @@ impl Renderer {
                 swapchain_data.swapchain_format,
                 &swapchain_data.swapchain_images,
             );
-            let _pipeline = Renderer::create_graphics_pipeline(&device);
+            let pipeline_layout =
+                Renderer::create_graphics_pipeline(&device, swapchain_data.swapchain_extent);
             Renderer {
                 _entry: entry,
                 instance,
@@ -124,6 +126,7 @@ impl Renderer {
                 swapchain_format: swapchain_data.swapchain_format,
                 swapchain_extent: swapchain_data.swapchain_extent,
                 swapchain_imageviews,
+                pipeline_layout,
             }
         }
     }
@@ -418,7 +421,10 @@ impl Renderer {
         image_views
     }
 
-    fn create_graphics_pipeline(device: &ash::Device) {
+    fn create_graphics_pipeline(
+        device: &ash::Device,
+        swapchain_extent: ash::vk::Extent2D,
+    ) -> ash::vk::PipelineLayout {
         let compiler = shaderc::Compiler::new().unwrap(); // TODO: move shader compilation to its own function/module
         let mut options = shaderc::CompileOptions::new().unwrap();
         options.add_macro_definition("EP", Some("main"));
@@ -447,7 +453,7 @@ impl Renderer {
         let vert_shader_module = Renderer::create_shader_module(device, vert_code);
         let frag_shader_module = Renderer::create_shader_module(device, frag_code);
         let main_function_name = CString::new("main").unwrap();
-        let _shader_staged = [
+        let _shader_stages = [
             ash::vk::PipelineShaderStageCreateInfo {
                 s_type: ash::vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
                 p_next: ptr::null(),
@@ -467,11 +473,122 @@ impl Renderer {
                 p_specialization_info: ptr::null(),
             },
         ];
-
+        let dynamic_states = [
+            ash::vk::DynamicState::VIEWPORT,
+            ash::vk::DynamicState::SCISSOR,
+        ];
+        let _dynamic_state_info = ash::vk::PipelineDynamicStateCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineDynamicStateCreateFlags::empty(),
+            dynamic_state_count: dynamic_states.len() as u32,
+            p_dynamic_states: dynamic_states.as_ptr(),
+        };
+        let _vertex_input_info = ash::vk::PipelineVertexInputStateCreateInfo {
+            // since I set the vertex data directly in the shader
+            s_type: ash::vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineVertexInputStateCreateFlags::empty(),
+            vertex_binding_description_count: 0,
+            p_vertex_binding_descriptions: ptr::null(),
+            vertex_attribute_description_count: 0,
+            p_vertex_attribute_descriptions: ptr::null(),
+        };
+        let _input_assembly_info = ash::vk::PipelineInputAssemblyStateCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineInputAssemblyStateCreateFlags::empty(),
+            topology: ash::vk::PrimitiveTopology::TRIANGLE_LIST,
+            primitive_restart_enable: ash::vk::FALSE,
+        };
+        let viewports = [ash::vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain_extent.width as f32,
+            height: swapchain_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [ash::vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: swapchain_extent,
+        }];
+        let _viewport_state_info = ash::vk::PipelineViewportStateCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineViewportStateCreateFlags::empty(),
+            viewport_count: 1,
+            p_viewports: viewports.as_ptr(),
+            scissor_count: 1,
+            p_scissors: scissors.as_ptr(),
+        };
+        let _rasterizer_info = ash::vk::PipelineRasterizationStateCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineRasterizationStateCreateFlags::empty(),
+            depth_clamp_enable: ash::vk::FALSE, // will clamp depth value instead of discarding on fragments beyond near and far planes. Useful in shadowmapping.
+            rasterizer_discard_enable: ash::vk::FALSE, // TRUE will not allow geometry to pass through rasterizer stage
+            polygon_mode: ash::vk::PolygonMode::FILL,
+            cull_mode: ash::vk::CullModeFlags::BACK,
+            front_face: ash::vk::FrontFace::CLOCKWISE,
+            depth_bias_enable: ash::vk::FALSE,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_clamp: 0.0,
+            depth_bias_slope_factor: 0.0,
+            line_width: 1.0,
+        };
+        let _multisampling = ash::vk::PipelineMultisampleStateCreateInfo {
+            // should be turned off for now
+            s_type: ash::vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineMultisampleStateCreateFlags::empty(),
+            rasterization_samples: ash::vk::SampleCountFlags::TYPE_1,
+            sample_shading_enable: ash::vk::FALSE,
+            min_sample_shading: 1.0,
+            p_sample_mask: ptr::null(),
+            alpha_to_coverage_enable: ash::vk::FALSE,
+            alpha_to_one_enable: ash::vk::FALSE,
+        };
+        let color_blend_attachment = [ash::vk::PipelineColorBlendAttachmentState {
+            // for alpha blending = bad performance, so turned off
+            color_write_mask: ash::vk::ColorComponentFlags::RGBA,
+            blend_enable: ash::vk::FALSE,
+            src_color_blend_factor: ash::vk::BlendFactor::ONE,
+            dst_color_blend_factor: ash::vk::BlendFactor::ZERO,
+            color_blend_op: ash::vk::BlendOp::ADD,
+            src_alpha_blend_factor: ash::vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: ash::vk::BlendFactor::ZERO,
+            alpha_blend_op: ash::vk::BlendOp::ADD,
+        }];
+        let _color_blend_info = ash::vk::PipelineColorBlendStateCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineColorBlendStateCreateFlags::empty(),
+            logic_op_enable: ash::vk::FALSE,
+            logic_op: ash::vk::LogicOp::COPY,
+            attachment_count: color_blend_attachment.len() as u32,
+            p_attachments: color_blend_attachment.as_ptr(),
+            blend_constants: [0.0, 0.0, 0.0, 0.0],
+        };
+        let pipeline_layout_info = ash::vk::PipelineLayoutCreateInfo {
+            s_type: ash::vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineLayoutCreateFlags::empty(),
+            set_layout_count: 0,
+            p_set_layouts: ptr::null(),
+            push_constant_range_count: 0,
+            p_push_constant_ranges: ptr::null(),
+        };
+        let pipeline_layout = unsafe {
+            device
+                .create_pipeline_layout(&pipeline_layout_info, None)
+                .expect("Failed to create a pipeline layout")
+        };
         unsafe {
             device.destroy_shader_module(vert_shader_module, None);
             device.destroy_shader_module(frag_shader_module, None);
         }
+        pipeline_layout
     }
 
     fn create_shader_module(device: &ash::Device, code: Vec<u8>) -> ash::vk::ShaderModule {
@@ -587,6 +704,8 @@ impl Drop for Renderer {
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_device(None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
