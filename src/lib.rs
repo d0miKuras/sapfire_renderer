@@ -81,6 +81,7 @@ pub struct Renderer {
     swapchain_format: ash::vk::Format,
     swapchain_extent: ash::vk::Extent2D,
     swapchain_imageviews: Vec<ash::vk::ImageView>,
+    render_pass: ash::vk::RenderPass,
     pipeline_layout: ash::vk::PipelineLayout,
 }
 
@@ -107,6 +108,8 @@ impl Renderer {
                 swapchain_data.swapchain_format,
                 &swapchain_data.swapchain_images,
             );
+            let render_pass =
+                Renderer::create_render_pass(&device, swapchain_data.swapchain_format);
             let pipeline_layout =
                 Renderer::create_graphics_pipeline(&device, swapchain_data.swapchain_extent);
             Renderer {
@@ -126,6 +129,7 @@ impl Renderer {
                 swapchain_format: swapchain_data.swapchain_format,
                 swapchain_extent: swapchain_data.swapchain_extent,
                 swapchain_imageviews,
+                render_pass,
                 pipeline_layout,
             }
         }
@@ -421,6 +425,55 @@ impl Renderer {
         image_views
     }
 
+    fn create_render_pass(
+        device: &ash::Device,
+        swapchain_format: ash::vk::Format,
+    ) -> ash::vk::RenderPass {
+        let color_attachment = ash::vk::AttachmentDescription {
+            format: swapchain_format,
+            flags: ash::vk::AttachmentDescriptionFlags::empty(),
+            samples: ash::vk::SampleCountFlags::TYPE_1,
+            load_op: ash::vk::AttachmentLoadOp::CLEAR,
+            store_op: ash::vk::AttachmentStoreOp::STORE,
+            stencil_load_op: ash::vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: ash::vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: ash::vk::ImageLayout::UNDEFINED,
+            final_layout: ash::vk::ImageLayout::PRESENT_SRC_KHR,
+        };
+        let color_attachment_ref = ash::vk::AttachmentReference {
+            attachment: 0,
+            layout: ash::vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };
+        let subpass_descr = ash::vk::SubpassDescription {
+            flags: ash::vk::SubpassDescriptionFlags::empty(),
+            pipeline_bind_point: ash::vk::PipelineBindPoint::GRAPHICS,
+            input_attachment_count: 0,
+            p_input_attachments: ptr::null(),
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment_ref,
+            p_resolve_attachments: ptr::null(),
+            p_depth_stencil_attachment: ptr::null(),
+            preserve_attachment_count: 0,
+            p_preserve_attachments: ptr::null(),
+        };
+        let renderpass_create_info = ash::vk::RenderPassCreateInfo {
+            s_type: ash::vk::StructureType::RENDER_PASS_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::RenderPassCreateFlags::empty(),
+            attachment_count: 1,
+            p_attachments: &color_attachment,
+            subpass_count: 1,
+            p_subpasses: &subpass_descr,
+            dependency_count: 0,
+            p_dependencies: ptr::null(),
+        };
+        unsafe {
+            device
+                .create_render_pass(&renderpass_create_info, None)
+                .expect("Failed to create render pass")
+        }
+    }
+
     fn create_graphics_pipeline(
         device: &ash::Device,
         swapchain_extent: ash::vk::Extent2D,
@@ -706,6 +759,7 @@ impl Drop for Renderer {
             self.surface_loader.destroy_surface(self.surface, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_device(None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
