@@ -84,6 +84,7 @@ pub struct Renderer {
     render_pass: ash::vk::RenderPass,
     pipeline_layout: ash::vk::PipelineLayout,
     gfx_pipeline: ash::vk::Pipeline,
+    framebuffers: Vec<ash::vk::Framebuffer>,
 }
 
 impl Renderer {
@@ -116,6 +117,12 @@ impl Renderer {
                 render_pass,
                 swapchain_data.swapchain_extent,
             );
+            let framebuffers = Renderer::create_framebuffers(
+                &device,
+                render_pass,
+                &swapchain_imageviews,
+                &swapchain_data.swapchain_extent,
+            );
             Renderer {
                 _entry: entry,
                 instance,
@@ -136,6 +143,7 @@ impl Renderer {
                 render_pass,
                 pipeline_layout,
                 gfx_pipeline,
+                framebuffers,
             }
         }
     }
@@ -689,6 +697,37 @@ impl Renderer {
                 .create_shader_module(&shader_module_create_info, None)
                 .expect("Failed to create shader module")
         }
+    }
+
+    fn create_framebuffers(
+        device: &ash::Device,
+        render_pass: ash::vk::RenderPass,
+        swapchain_imageviews: &Vec<ash::vk::ImageView>,
+        swapchain_extent: &ash::vk::Extent2D,
+    ) -> Vec<ash::vk::Framebuffer> {
+        swapchain_imageviews
+            .iter()
+            .map(|&view| {
+                let attachments = [view];
+                let create_info = ash::vk::FramebufferCreateInfo {
+                    s_type: ash::vk::StructureType::FRAMEBUFFER_CREATE_INFO,
+                    p_next: ptr::null(),
+                    flags: ash::vk::FramebufferCreateFlags::empty(),
+                    render_pass,
+                    attachment_count: attachments.len() as u32,
+                    p_attachments: attachments.as_ptr(),
+                    width: swapchain_extent.width,
+                    height: swapchain_extent.height,
+                    layers: 1,
+                };
+                let framebuffer = unsafe {
+                    device
+                        .create_framebuffer(&create_info, None)
+                        .expect("Failed to create framebuffer")
+                };
+                framebuffer
+            })
+            .collect()
     }
 
     fn setup_debug_utils(
