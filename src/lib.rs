@@ -83,6 +83,7 @@ pub struct Renderer {
     swapchain_imageviews: Vec<ash::vk::ImageView>,
     render_pass: ash::vk::RenderPass,
     pipeline_layout: ash::vk::PipelineLayout,
+    gfx_pipeline: ash::vk::Pipeline,
 }
 
 impl Renderer {
@@ -110,8 +111,11 @@ impl Renderer {
             );
             let render_pass =
                 Renderer::create_render_pass(&device, swapchain_data.swapchain_format);
-            let pipeline_layout =
-                Renderer::create_graphics_pipeline(&device, swapchain_data.swapchain_extent);
+            let (gfx_pipeline, pipeline_layout) = Renderer::create_graphics_pipeline(
+                &device,
+                render_pass,
+                swapchain_data.swapchain_extent,
+            );
             Renderer {
                 _entry: entry,
                 instance,
@@ -131,6 +135,7 @@ impl Renderer {
                 swapchain_imageviews,
                 render_pass,
                 pipeline_layout,
+                gfx_pipeline,
             }
         }
     }
@@ -476,8 +481,9 @@ impl Renderer {
 
     fn create_graphics_pipeline(
         device: &ash::Device,
+        render_pass: ash::vk::RenderPass,
         swapchain_extent: ash::vk::Extent2D,
-    ) -> ash::vk::PipelineLayout {
+    ) -> (ash::vk::Pipeline, ash::vk::PipelineLayout) {
         let compiler = shaderc::Compiler::new().unwrap(); // TODO: move shader compilation to its own function/module
         let mut options = shaderc::CompileOptions::new().unwrap();
         options.add_macro_definition("EP", Some("main"));
@@ -506,7 +512,7 @@ impl Renderer {
         let vert_shader_module = Renderer::create_shader_module(device, vert_code);
         let frag_shader_module = Renderer::create_shader_module(device, frag_code);
         let main_function_name = CString::new("main").unwrap();
-        let _shader_stages = [
+        let shader_stages = [
             ash::vk::PipelineShaderStageCreateInfo {
                 s_type: ash::vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
                 p_next: ptr::null(),
@@ -530,14 +536,14 @@ impl Renderer {
             ash::vk::DynamicState::VIEWPORT,
             ash::vk::DynamicState::SCISSOR,
         ];
-        let _dynamic_state_info = ash::vk::PipelineDynamicStateCreateInfo {
+        let dynamic_state_info = ash::vk::PipelineDynamicStateCreateInfo {
             s_type: ash::vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: ash::vk::PipelineDynamicStateCreateFlags::empty(),
             dynamic_state_count: dynamic_states.len() as u32,
             p_dynamic_states: dynamic_states.as_ptr(),
         };
-        let _vertex_input_info = ash::vk::PipelineVertexInputStateCreateInfo {
+        let vertex_input_info = ash::vk::PipelineVertexInputStateCreateInfo {
             // since I set the vertex data directly in the shader
             s_type: ash::vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             p_next: ptr::null(),
@@ -547,7 +553,7 @@ impl Renderer {
             vertex_attribute_description_count: 0,
             p_vertex_attribute_descriptions: ptr::null(),
         };
-        let _input_assembly_info = ash::vk::PipelineInputAssemblyStateCreateInfo {
+        let input_assembly_info = ash::vk::PipelineInputAssemblyStateCreateInfo {
             s_type: ash::vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: ash::vk::PipelineInputAssemblyStateCreateFlags::empty(),
@@ -566,7 +572,7 @@ impl Renderer {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: swapchain_extent,
         }];
-        let _viewport_state_info = ash::vk::PipelineViewportStateCreateInfo {
+        let viewport_state_info = ash::vk::PipelineViewportStateCreateInfo {
             s_type: ash::vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: ash::vk::PipelineViewportStateCreateFlags::empty(),
@@ -575,7 +581,7 @@ impl Renderer {
             scissor_count: 1,
             p_scissors: scissors.as_ptr(),
         };
-        let _rasterizer_info = ash::vk::PipelineRasterizationStateCreateInfo {
+        let rasterizer_info = ash::vk::PipelineRasterizationStateCreateInfo {
             s_type: ash::vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: ash::vk::PipelineRasterizationStateCreateFlags::empty(),
@@ -590,7 +596,7 @@ impl Renderer {
             depth_bias_slope_factor: 0.0,
             line_width: 1.0,
         };
-        let _multisampling = ash::vk::PipelineMultisampleStateCreateInfo {
+        let multisampling = ash::vk::PipelineMultisampleStateCreateInfo {
             // should be turned off for now
             s_type: ash::vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             p_next: ptr::null(),
@@ -613,7 +619,7 @@ impl Renderer {
             dst_alpha_blend_factor: ash::vk::BlendFactor::ZERO,
             alpha_blend_op: ash::vk::BlendOp::ADD,
         }];
-        let _color_blend_info = ash::vk::PipelineColorBlendStateCreateInfo {
+        let color_blend_info = ash::vk::PipelineColorBlendStateCreateInfo {
             s_type: ash::vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: ash::vk::PipelineColorBlendStateCreateFlags::empty(),
@@ -637,11 +643,37 @@ impl Renderer {
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .expect("Failed to create a pipeline layout")
         };
+        let pipeline_infos = [ash::vk::GraphicsPipelineCreateInfo {
+            s_type: ash::vk::StructureType::GRAPHICS_PIPELINE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: ash::vk::PipelineCreateFlags::empty(),
+            stage_count: shader_stages.len() as u32,
+            p_stages: shader_stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_info,
+            p_input_assembly_state: &input_assembly_info,
+            p_tessellation_state: ptr::null(),
+            p_viewport_state: &viewport_state_info,
+            p_rasterization_state: &rasterizer_info,
+            p_multisample_state: &multisampling,
+            p_depth_stencil_state: ptr::null(),
+            p_color_blend_state: &color_blend_info,
+            p_dynamic_state: &dynamic_state_info,
+            layout: pipeline_layout,
+            render_pass,
+            subpass: 0,
+            base_pipeline_handle: ash::vk::Pipeline::null(),
+            base_pipeline_index: -1,
+        }];
+        let gfx_pipelines = unsafe {
+            device
+                .create_graphics_pipelines(ash::vk::PipelineCache::null(), &pipeline_infos, None)
+                .expect("Failed to create graphics pipeline")
+        };
         unsafe {
             device.destroy_shader_module(vert_shader_module, None);
             device.destroy_shader_module(frag_shader_module, None);
         }
-        pipeline_layout
+        (gfx_pipelines[0], pipeline_layout)
     }
 
     fn create_shader_module(device: &ash::Device, code: Vec<u8>) -> ash::vk::ShaderModule {
@@ -757,6 +789,7 @@ impl Drop for Renderer {
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
+            self.device.destroy_pipeline(self.gfx_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             self.device.destroy_render_pass(self.render_pass, None);

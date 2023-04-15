@@ -3,7 +3,6 @@ use std::ptr;
 use ash::{self, vk};
 
 unsafe extern "system" fn vulkan_debug_utils_callback(
-    //
     message_severity: ash::vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: ash::vk::DebugUtilsMessageTypeFlagsEXT,
     p_callback_data: *const ash::vk::DebugUtilsMessengerCallbackDataEXT,
