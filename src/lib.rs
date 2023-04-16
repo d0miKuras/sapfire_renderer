@@ -6,35 +6,43 @@ use ash::Instance;
 use debug::{populate_debug_messenger_create_info, ValidationInfo};
 use queries::QueueFamilyIndices;
 use std::{ffi::CString, os::raw::c_void, ptr};
+use vertex::Vertex;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 mod debug;
 mod helpers;
 mod queries;
+pub mod vertex;
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+const _VERTICES_DATA: [Vertex; 3] = [
+    Vertex {
+        position: [0.0, -0.5, 0.0],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, 0.5, 0.0],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [-0.5, 0.5, 0.0],
+        color: [0.0, 0.0, 1.0],
+    },
+];
+
 const VERTEX_SHADER: &str = "
 #version 450
 
-vec2 positions[3] = vec2[](
-    vec2(0.0, -0.5),
-    vec2(0.5, 0.5),
-    vec2(-0.5, 0.5)
-);
-
-vec3 colors[3] = vec3[](
-    vec3(1.0, 0.0, 0.0),
-    vec3(0.0, 1.0, 0.0),
-    vec3(0.0, 0.0, 1.0)
-);
-
+layout(location = 0) in vec2 inPosition;
+layout(location = 1) in vec3 inColor;
 layout(location = 0) out vec3 fragColor;
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
-    fragColor = colors[gl_VertexIndex];
+    gl_Position = vec4(inPosition, 0.0, 1.0);
+    fragColor = inColor;
 }";
 
 const FRAGMENT_SHADER: &str = "
@@ -723,15 +731,17 @@ impl Renderer {
         //     dynamic_state_count: dynamic_states.len() as u32,
         //     p_dynamic_states: dynamic_states.as_ptr(),
         // };
+        let vertex_binding_descr = [Vertex::binding_description()];
+        let vertext_attrib_descr = Vertex::attribute_description();
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
             // since I set the vertex data directly in the shader
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineVertexInputStateCreateFlags::empty(),
-            vertex_binding_description_count: 0,
-            p_vertex_binding_descriptions: ptr::null(),
-            vertex_attribute_description_count: 0,
-            p_vertex_attribute_descriptions: ptr::null(),
+            vertex_binding_description_count: vertex_binding_descr.len() as u32,
+            p_vertex_binding_descriptions: vertex_binding_descr.as_ptr(),
+            vertex_attribute_description_count: vertext_attrib_descr.len() as u32,
+            p_vertex_attribute_descriptions: vertext_attrib_descr.as_ptr(),
         };
         let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
