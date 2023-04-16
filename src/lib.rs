@@ -238,18 +238,30 @@ impl Renderer {
 
     fn draw_frame(&mut self) {
         let wait_fences = [self.in_flight_fences[self.current_frame]];
-        let (next_image_index, _) = unsafe {
+        unsafe {
             self.device
                 .wait_for_fences(&wait_fences, true, std::u64::MAX)
                 .expect("Failed to wait for fences");
-            self.swapchain_loader
-                .acquire_next_image(
-                    self.swapchain,
-                    std::u64::MAX,
-                    self.image_available_semaphores[self.current_frame],
-                    vk::Fence::null(),
-                )
-                .expect("Failed to acquire next framebuffer")
+        };
+        let (image_index, _) = unsafe {
+            let result = self.swapchain_loader.acquire_next_image(
+                self.swapchain,
+                std::u64::MAX,
+                self.image_available_semaphores[self.current_frame],
+                vk::Fence::null(),
+            );
+            match result {
+                Ok(image_index) => image_index,
+                Err(vk_result) => match vk_result {
+                    vk::Result::ERROR_OUT_OF_DATE_KHR => {
+                        self.recreate_swapchain_default();
+                        return;
+                    }
+                    _ => {
+                        panic!("Failed to acquire swapchain image");
+                    }
+                },
+            }
         };
         let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -261,7 +273,7 @@ impl Renderer {
             p_wait_semaphores: wait_semaphores.as_ptr(),
             p_wait_dst_stage_mask: wait_stages.as_ptr(),
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffers[next_image_index as usize],
+            p_command_buffers: &self.command_buffers[image_index as usize],
             signal_semaphore_count: signal_semaphores.len() as u32,
             p_signal_semaphores: signal_semaphores.as_ptr(),
         }];
@@ -285,17 +297,33 @@ impl Renderer {
             p_wait_semaphores: signal_semaphores.as_ptr(),
             swapchain_count: 1,
             p_swapchains: swapchains.as_ptr(),
-            p_image_indices: &next_image_index,
+            p_image_indices: &image_index,
             p_results: ptr::null_mut(),
         };
-        unsafe {
+        let result = unsafe {
             self.swapchain_loader
                 .queue_present(self.present_queue, &present_info)
-                .expect("Failed to submit present queue");
+        };
+        let is_resized = match result {
+            Ok(_) => self.is_framebuffer_resized,
+            Err(vk_res) => match vk_res {
+                vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR => true,
+                _ => panic!("Failed to execute queue present"),
+            },
+        };
+        if is_resized {
+            self.is_framebuffer_resized = false;
+            self.recreate_swapchain_default();
         }
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
+    fn recreate_swapchain_default(&mut self) {
+        self.recreate_swapchain(winit::dpi::PhysicalSize::<u32> {
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+        });
+    }
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         let surface_data = SurfaceData {
             surface: self.surface,
