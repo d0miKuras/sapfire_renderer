@@ -59,6 +59,8 @@ const DEVICE_EXTENSIONS: queries::DeviceExtension = queries::DeviceExtension {
 pub struct SurfaceData {
     pub surface: vk::SurfaceKHR,
     pub surface_loader: extensions::khr::Surface,
+    pub width: u32,
+    pub height: u32,
 }
 
 struct SwapChainData {
@@ -82,8 +84,9 @@ pub struct Renderer {
     surface_loader: extensions::khr::Surface,
     debug_utils_loader: extensions::ext::DebugUtils,
     debug_messenger: vk::DebugUtilsMessengerEXT,
-    _gpu: vk::PhysicalDevice,
+    gpu: vk::PhysicalDevice,
     device: Device,
+    queue_family: QueueFamilyIndices,
     gfx_queue: vk::Queue,
     present_queue: vk::Queue,
     swapchain_loader: extensions::khr::Swapchain,
@@ -102,6 +105,7 @@ pub struct Renderer {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
+    is_framebuffer_resized: bool,
 }
 
 impl Renderer {
@@ -155,8 +159,9 @@ impl Renderer {
                 instance,
                 debug_utils_loader,
                 debug_messenger,
-                _gpu: gpu,
+                gpu,
                 device,
+                queue_family: indices,
                 gfx_queue,
                 present_queue,
                 surface: surface_data.surface,
@@ -177,6 +182,7 @@ impl Renderer {
                 render_finished_semaphores: sync_object.render_finished_semaphores,
                 in_flight_fences: sync_object.inflight_fences,
                 current_frame: 0,
+                is_framebuffer_resized: false,
             }
         }
     }
@@ -205,6 +211,9 @@ impl Renderer {
                         _ => {}
                     },
                 },
+                WindowEvent::Resized(size) => {
+                    self.recreate_swapchain(size);
+                }
                 _ => {}
             },
             Event::RedrawEventsCleared => window.request_redraw(),
@@ -277,6 +286,58 @@ impl Renderer {
                 .expect("Failed to submit present queue");
         }
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
+        let surface_data = SurfaceData {
+            surface: self.surface,
+            surface_loader: self.surface_loader.clone(),
+            width: size.width,
+            height: size.height,
+        };
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .expect("Failed to wait for the device to become idle");
+        }
+        self.drop_swapchain();
+        let swapchain_data = Renderer::create_swap_chain(
+            &self.instance,
+            &self.device,
+            self.gpu,
+            &surface_data,
+            &self.queue_family,
+        );
+        self.swapchain = swapchain_data.swapchain;
+        self.swapchain_extent = swapchain_data.swapchain_extent;
+        self.swapchain_format = swapchain_data.swapchain_format;
+        self.swapchain_loader = swapchain_data.swapchain_loader;
+        self.swapchain_images = swapchain_data.swapchain_images;
+        self.swapchain_imageviews = Renderer::create_image_views(
+            &self.device,
+            self.swapchain_format,
+            &self.swapchain_images,
+        );
+        self.render_pass = Renderer::create_render_pass(&self.device, self.swapchain_format);
+        (self.gfx_pipeline, self.pipeline_layout) = Renderer::create_graphics_pipeline(
+            &self.device,
+            self.render_pass,
+            swapchain_data.swapchain_extent,
+        );
+        self.framebuffers = Renderer::create_framebuffers(
+            &self.device,
+            self.render_pass,
+            &self.swapchain_imageviews,
+            &self.swapchain_extent,
+        );
+        self.command_buffers = Renderer::create_command_buffers(
+            &self.device,
+            self.command_pool,
+            self.gfx_pipeline,
+            self.render_pass,
+            &self.framebuffers,
+            self.swapchain_extent,
+        )
     }
 
     fn create_instance(entry: &Entry) -> ash::Instance {
@@ -438,6 +499,8 @@ impl Renderer {
         SurfaceData {
             surface,
             surface_loader,
+            width: window.inner_size().width,
+            height: window.inner_size().height,
         }
     }
 
@@ -1044,6 +1107,25 @@ impl Renderer {
             }
         }
     }
+
+    fn drop_swapchain(&self) {
+        unsafe {
+            self.device
+                .free_command_buffers(self.command_pool, &self.command_buffers);
+            for &framebuffer in self.framebuffers.iter() {
+                self.device.destroy_framebuffer(framebuffer, None);
+            }
+            self.device.destroy_pipeline(self.gfx_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.destroy_render_pass(self.render_pass, None);
+            for &imageview in self.swapchain_imageviews.iter() {
+                self.device.destroy_image_view(imageview, None);
+            }
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+        }
+    }
 }
 
 impl Drop for Renderer {
@@ -1056,20 +1138,9 @@ impl Drop for Renderer {
                     .destroy_semaphore(self.render_finished_semaphores[i], None);
                 self.device.destroy_fence(self.in_flight_fences[i], None);
             }
+            self.drop_swapchain();
             self.device.destroy_command_pool(self.command_pool, None);
-            self.swapchain_imageviews
-                .iter()
-                .for_each(|&view| self.device.destroy_image_view(view, None));
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
-            self.framebuffers.iter().for_each(|&framebuffer| {
-                self.device.destroy_framebuffer(framebuffer, None);
-            });
             self.surface_loader.destroy_surface(self.surface, None);
-            self.device.destroy_pipeline(self.gfx_pipeline, None);
-            self.device
-                .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
             self.device.destroy_device(None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
