@@ -246,6 +246,12 @@ impl Renderer {
                 flags: vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR,
                 p_application_info: &app_info,
             };
+            let instance: Instance = unsafe {
+                entry
+                    .create_instance(&create_info, None)
+                    .expect("Failed to create Vulkan instance!")
+            };
+            instance
         }
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
@@ -958,7 +964,7 @@ pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
 
-#[cfg(all(unix))]
+#[cfg(all(linux))]
 pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
