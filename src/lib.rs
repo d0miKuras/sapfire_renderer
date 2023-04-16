@@ -1,6 +1,5 @@
 use ash::extensions;
 use ash::vk;
-use ash::vk::ClearColorValue;
 use ash::Device;
 use ash::Entry;
 use ash::Instance;
@@ -15,6 +14,7 @@ mod queries;
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const VERTEX_SHADER: &str = "
 #version 450
 
@@ -69,6 +69,12 @@ struct SwapChainData {
     swapchain_extent: vk::Extent2D,
 }
 
+struct SyncObjects {
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    inflight_fences: Vec<vk::Fence>,
+}
+
 pub struct Renderer {
     _entry: Entry,
     instance: Instance,
@@ -78,8 +84,8 @@ pub struct Renderer {
     debug_messenger: vk::DebugUtilsMessengerEXT,
     _gpu: vk::PhysicalDevice,
     device: Device,
-    _gfx_queue: vk::Queue,
-    _present_queue: vk::Queue,
+    gfx_queue: vk::Queue,
+    present_queue: vk::Queue,
     swapchain_loader: extensions::khr::Swapchain,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
@@ -91,7 +97,11 @@ pub struct Renderer {
     gfx_pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
-    _command_buffers: Vec<vk::CommandBuffer>,
+    command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    current_frame: usize,
 }
 
 impl Renderer {
@@ -139,6 +149,7 @@ impl Renderer {
                 &framebuffers,
                 swapchain_data.swapchain_extent,
             );
+            let sync_object = Renderer::create_sync_objects(&device);
             Renderer {
                 _entry: entry,
                 instance,
@@ -146,8 +157,8 @@ impl Renderer {
                 debug_messenger,
                 _gpu: gpu,
                 device,
-                _gfx_queue: gfx_queue,
-                _present_queue: present_queue,
+                gfx_queue,
+                present_queue,
                 surface: surface_data.surface,
                 surface_loader: surface_data.surface_loader,
                 swapchain: swapchain_data.swapchain,
@@ -161,7 +172,11 @@ impl Renderer {
                 gfx_pipeline,
                 framebuffers,
                 command_pool,
-                _command_buffers: command_buffers,
+                command_buffers,
+                image_available_semaphores: sync_object.image_available_semaphores,
+                render_finished_semaphores: sync_object.render_finished_semaphores,
+                in_flight_fences: sync_object.inflight_fences,
+                current_frame: 0,
             }
         }
     }
@@ -174,7 +189,7 @@ impl Renderer {
             .expect("Failed to create window.")
     }
 
-    pub fn main_loop(self, window: winit::window::Window, event_loop: EventLoop<()>) {
+    pub fn main_loop(mut self, window: winit::window::Window, event_loop: EventLoop<()>) {
         event_loop.run(move |event, _, control_flow| match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
@@ -193,9 +208,75 @@ impl Renderer {
                 _ => {}
             },
             Event::RedrawEventsCleared => window.request_redraw(),
+            Event::RedrawRequested(_windowid) => self.draw_frame(),
+            Event::LoopDestroyed => unsafe {
+                self.device
+                    .device_wait_idle()
+                    .expect("Failed to wait for device to become idle");
+            },
 
             _ => (),
         })
+    }
+
+    fn draw_frame(&mut self) {
+        let wait_fences = [self.in_flight_fences[self.current_frame]];
+        let (next_image_index, _) = unsafe {
+            self.device
+                .wait_for_fences(&wait_fences, true, std::u64::MAX)
+                .expect("Failed to wait for fences");
+            self.swapchain_loader
+                .acquire_next_image(
+                    self.swapchain,
+                    std::u64::MAX,
+                    self.image_available_semaphores[self.current_frame],
+                    vk::Fence::null(),
+                )
+                .expect("Failed to acquire next framebuffer")
+        };
+        let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
+        let submit_infos = [vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: wait_semaphores.len() as u32,
+            p_wait_semaphores: wait_semaphores.as_ptr(),
+            p_wait_dst_stage_mask: wait_stages.as_ptr(),
+            command_buffer_count: 1,
+            p_command_buffers: &self.command_buffers[next_image_index as usize],
+            signal_semaphore_count: signal_semaphores.len() as u32,
+            p_signal_semaphores: signal_semaphores.as_ptr(),
+        }];
+        unsafe {
+            self.device
+                .reset_fences(&wait_fences)
+                .expect("Failed to reset wait fences");
+            self.device
+                .queue_submit(
+                    self.gfx_queue,
+                    &submit_infos,
+                    self.in_flight_fences[self.current_frame],
+                )
+                .expect("Failed to submit queue");
+        };
+        let swapchains = [self.swapchain];
+        let present_info = vk::PresentInfoKHR {
+            s_type: vk::StructureType::PRESENT_INFO_KHR,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: signal_semaphores.as_ptr(),
+            swapchain_count: 1,
+            p_swapchains: swapchains.as_ptr(),
+            p_image_indices: &next_image_index,
+            p_results: ptr::null_mut(),
+        };
+        unsafe {
+            self.swapchain_loader
+                .queue_present(self.present_queue, &present_info)
+                .expect("Failed to submit present queue");
+        }
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     fn create_instance(entry: &Entry) -> ash::Instance {
@@ -490,16 +571,26 @@ impl Renderer {
             preserve_attachment_count: 0,
             p_preserve_attachments: ptr::null(),
         };
+        let render_pass_attachments = [color_attachment];
+        let subpass_dependencies = [vk::SubpassDependency {
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            dependency_flags: vk::DependencyFlags::empty(),
+        }];
         let renderpass_create_info = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::RenderPassCreateFlags::empty(),
-            attachment_count: 1,
-            p_attachments: &color_attachment,
+            attachment_count: render_pass_attachments.len() as u32,
+            p_attachments: render_pass_attachments.as_ptr(),
             subpass_count: 1,
             p_subpasses: &subpass_descr,
-            dependency_count: 0,
-            p_dependencies: ptr::null(),
+            dependency_count: subpass_dependencies.len() as u32,
+            p_dependencies: subpass_dependencies.as_ptr(),
         };
         unsafe {
             device
@@ -561,14 +652,14 @@ impl Renderer {
                 p_specialization_info: ptr::null(),
             },
         ];
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state_info = vk::PipelineDynamicStateCreateInfo {
-            s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::PipelineDynamicStateCreateFlags::empty(),
-            dynamic_state_count: dynamic_states.len() as u32,
-            p_dynamic_states: dynamic_states.as_ptr(),
-        };
+        // let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        // let dynamic_state_info = vk::PipelineDynamicStateCreateInfo {
+        //     s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        //     p_next: ptr::null(),
+        //     flags: vk::PipelineDynamicStateCreateFlags::empty(),
+        //     dynamic_state_count: dynamic_states.len() as u32,
+        //     p_dynamic_states: dynamic_states.as_ptr(),
+        // };
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
             // since I set the vertex data directly in the shader
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -602,9 +693,9 @@ impl Renderer {
             s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineViewportStateCreateFlags::empty(),
-            viewport_count: 1,
+            viewport_count: viewports.len() as u32,
             p_viewports: viewports.as_ptr(),
-            scissor_count: 1,
+            scissor_count: scissors.len() as u32,
             p_scissors: scissors.as_ptr(),
         };
         let rasterizer_info = vk::PipelineRasterizationStateCreateInfo {
@@ -683,7 +774,7 @@ impl Renderer {
             p_multisample_state: &multisampling,
             p_depth_stencil_state: ptr::null(),
             p_color_blend_state: &color_blend_info,
-            p_dynamic_state: &dynamic_state_info,
+            p_dynamic_state: ptr::null(),
             layout: pipeline_layout,
             render_pass,
             subpass: 0,
@@ -832,6 +923,45 @@ impl Renderer {
         command_buffers
     }
 
+    fn create_sync_objects(device: &Device) -> SyncObjects {
+        let mut sync_objects = SyncObjects {
+            image_available_semaphores: vec![],
+            render_finished_semaphores: vec![],
+            inflight_fences: vec![],
+        };
+        let sem_create_info = vk::SemaphoreCreateInfo {
+            s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::SemaphoreCreateFlags::empty(),
+        };
+        let fen_create_info = vk::FenceCreateInfo {
+            s_type: vk::StructureType::FENCE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::FenceCreateFlags::SIGNALED,
+        };
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            unsafe {
+                let image_available_semaphore = device
+                    .create_semaphore(&sem_create_info, None)
+                    .expect("Fauled to create image available semaphore");
+                let render_finished_semaphore = device
+                    .create_semaphore(&sem_create_info, None)
+                    .expect("Failed to create render finished semaphore");
+                let inflight_fence = device
+                    .create_fence(&fen_create_info, None)
+                    .expect("Failed to craete inflight fence");
+                sync_objects
+                    .image_available_semaphores
+                    .push(image_available_semaphore);
+                sync_objects
+                    .render_finished_semaphores
+                    .push(render_finished_semaphore);
+                sync_objects.inflight_fences.push(inflight_fence);
+            }
+        }
+        sync_objects
+    }
+
     fn setup_debug_utils(
         entry: &Entry,
         instance: &Instance,
@@ -919,6 +1049,13 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
+            for i in 0..MAX_FRAMES_IN_FLIGHT {
+                self.device
+                    .destroy_semaphore(self.image_available_semaphores[i], None);
+                self.device
+                    .destroy_semaphore(self.render_finished_semaphores[i], None);
+                self.device.destroy_fence(self.in_flight_fences[i], None);
+            }
             self.device.destroy_command_pool(self.command_pool, None);
             self.swapchain_imageviews
                 .iter()
