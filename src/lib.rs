@@ -1062,6 +1062,9 @@ impl Drop for Renderer {
                 .for_each(|&view| self.device.destroy_image_view(view, None));
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
+            self.framebuffers.iter().for_each(|&framebuffer| {
+                self.device.destroy_framebuffer(framebuffer, None);
+            });
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_pipeline(self.gfx_pipeline, None);
             self.device
