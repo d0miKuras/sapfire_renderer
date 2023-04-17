@@ -1,4 +1,6 @@
 #!/bin/bash
+
+# Use this to launch on mac
 export VULKAN_SDK=$HOME/VulkanSDK/1.3.243.0/macOS
 PATH="$PATH:$VULKAN_SDK/bin"
 export PATH
