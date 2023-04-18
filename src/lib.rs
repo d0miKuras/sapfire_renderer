@@ -18,7 +18,7 @@ const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-const _VERTICES_DATA: [Vertex; 3] = [
+const VERTICES_DATA: [Vertex; 3] = [
     Vertex {
         position: [0.0, -0.5, 0.0],
         color: [1.0, 0.0, 0.0],
@@ -114,6 +114,8 @@ pub struct Renderer {
     in_flight_fences: Vec<vk::Fence>,
     current_frame: usize,
     is_framebuffer_resized: bool,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_mem: vk::DeviceMemory,
 }
 
 impl Renderer {
@@ -152,6 +154,8 @@ impl Renderer {
                 &swapchain_imageviews,
                 &swapchain_data.swapchain_extent,
             );
+            let (vertex_buffer, vertex_buffer_mem) =
+                Renderer::create_vertex_buffer(&instance, &device, gpu);
             let command_pool = Renderer::create_command_pool(&device, &indices);
             let command_buffers = Renderer::create_command_buffers(
                 &device,
@@ -160,6 +164,7 @@ impl Renderer {
                 render_pass,
                 &framebuffers,
                 swapchain_data.swapchain_extent,
+                vertex_buffer,
             );
             let sync_object = Renderer::create_sync_objects(&device);
             Renderer {
@@ -191,6 +196,8 @@ impl Renderer {
                 in_flight_fences: sync_object.inflight_fences,
                 current_frame: 0,
                 is_framebuffer_resized: false,
+                vertex_buffer,
+                vertex_buffer_mem,
             }
         }
     }
@@ -373,6 +380,7 @@ impl Renderer {
             self.render_pass,
             &self.framebuffers,
             self.swapchain_extent,
+            self.vertex_buffer,
         )
     }
 
@@ -940,6 +948,61 @@ impl Renderer {
             .collect()
     }
 
+    fn create_vertex_buffer(
+        instance: &Instance,
+        device: &Device,
+        gpu: vk::PhysicalDevice,
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let vertex_buffer_info = vk::BufferCreateInfo {
+            s_type: vk::StructureType::BUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::BufferCreateFlags::empty(),
+            size: std::mem::size_of_val(&VERTICES_DATA) as u64,
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(),
+        };
+        let vertex_buffer = unsafe {
+            device
+                .create_buffer(&vertex_buffer_info, None)
+                .expect("Failed to create vertex buffer")
+        };
+        let mem_reqs = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
+        let mem_props = unsafe { instance.get_physical_device_memory_properties(gpu) };
+        let req_mem_flags =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let mem_type =
+            Renderer::pick_memory_type(mem_reqs.memory_type_bits, req_mem_flags, mem_props);
+        let alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            allocation_size: mem_reqs.size,
+            memory_type_index: mem_type,
+        };
+        let vertex_buffer_mem = unsafe {
+            device
+                .allocate_memory(&alloc_info, None)
+                .expect("Failed to allocate memory for vertex buffer")
+        };
+        unsafe {
+            device
+                .bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0)
+                .expect("Failed to bind buffer memory");
+            let data_ptr = device
+                .map_memory(
+                    vertex_buffer_mem,
+                    0,
+                    vertex_buffer_info.size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("Failed to map memory") as *mut Vertex;
+            data_ptr.copy_from_nonoverlapping(VERTICES_DATA.as_ptr(), VERTICES_DATA.len());
+            device.unmap_memory(vertex_buffer_mem);
+        };
+        (vertex_buffer, vertex_buffer_mem)
+    }
+
     fn create_command_pool(device: &Device, queue_family: &QueueFamilyIndices) -> vk::CommandPool {
         let command_pool_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
@@ -961,6 +1024,7 @@ impl Renderer {
         render_pass: vk::RenderPass,
         frambuffers: &Vec<vk::Framebuffer>,
         surface_extent: vk::Extent2D,
+        vertex_buffer: vk::Buffer,
     ) -> Vec<vk::CommandBuffer> {
         let command_buffer_info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1014,7 +1078,10 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS,
                     gfx_pipeline,
                 );
-                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+                let vertex_buffers = [vertex_buffer];
+                let offsets = [0_u64];
+                device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
+                device.cmd_draw(command_buffer, VERTICES_DATA.len() as u32, 1, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
                 device
                     .end_command_buffer(command_buffer)
@@ -1146,6 +1213,20 @@ impl Renderer {
         }
     }
 
+    fn pick_memory_type(
+        type_filter: u32,
+        required_properties: vk::MemoryPropertyFlags,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+    ) -> u32 {
+        for (i, mem_type) in memory_properties.memory_types.iter().enumerate() {
+            if (type_filter & (1 << i)) > 0 && mem_type.property_flags.contains(required_properties)
+            {
+                return i as u32;
+            }
+        }
+        panic!("Failed to find suitable memory");
+    }
+
     fn drop_swapchain(&self) {
         unsafe {
             self.device
@@ -1177,6 +1258,8 @@ impl Drop for Renderer {
                 self.device.destroy_fence(self.in_flight_fences[i], None);
             }
             self.drop_swapchain();
+            self.device.destroy_buffer(self.vertex_buffer, None);
+            self.device.free_memory(self.vertex_buffer_mem, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);
@@ -1213,7 +1296,7 @@ pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
 
-#[cfg(all(linux))]
+#[cfg(all(unix))]
 pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
