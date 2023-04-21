@@ -107,10 +107,8 @@ pub struct Renderer {
     pipeline_layout: vk::PipelineLayout,
     gfx_pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
-    command_pool_gfx: vk::CommandPool,
-    command_buffers_gfx: Vec<vk::CommandBuffer>,
-    command_pool_transfer: vk::CommandPool,
-    command_buffers_transfer: Vec<vk::CommandBuffer>,
+    command_pool: vk::CommandPool,
+    command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
@@ -158,21 +156,15 @@ impl Renderer {
             );
             let (vertex_buffer, vertex_buffer_mem) =
                 Renderer::create_vertex_buffer(&instance, &device, gpu);
-            let command_pool_gfx = Renderer::create_command_pool_gfx(&device, &indices);
-            let command_buffers_gfx = Renderer::create_command_buffers_gfx(
+            let command_pool = Renderer::create_command_pool(&device, &indices);
+            let command_buffers = Renderer::create_command_buffers(
                 &device,
-                command_pool_gfx,
+                command_pool,
                 gfx_pipeline,
                 render_pass,
                 &framebuffers,
                 swapchain_data.swapchain_extent,
                 vertex_buffer,
-            );
-            let command_pool_transfer = Renderer::create_command_pool_transfer(&device, &indices);
-            let command_buffers_transfer = Renderer::create_command_buffers_transfer(
-                &device,
-                command_pool_transfer,
-                &framebuffers,
             );
             let sync_object = Renderer::create_sync_objects(&device);
             Renderer {
@@ -197,10 +189,8 @@ impl Renderer {
                 pipeline_layout,
                 gfx_pipeline,
                 framebuffers,
-                command_pool_gfx,
-                command_buffers_gfx,
-                command_pool_transfer,
-                command_buffers_transfer,
+                command_pool,
+                command_buffers,
                 image_available_semaphores: sync_object.image_available_semaphores,
                 render_finished_semaphores: sync_object.render_finished_semaphores,
                 in_flight_fences: sync_object.inflight_fences,
@@ -290,7 +280,7 @@ impl Renderer {
             p_wait_semaphores: wait_semaphores.as_ptr(),
             p_wait_dst_stage_mask: wait_stages.as_ptr(),
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffers_gfx[image_index as usize],
+            p_command_buffers: &self.command_buffers[image_index as usize],
             signal_semaphore_count: signal_semaphores.len() as u32,
             p_signal_semaphores: signal_semaphores.as_ptr(),
         }];
@@ -383,9 +373,9 @@ impl Renderer {
             &self.swapchain_imageviews,
             &self.swapchain_extent,
         );
-        self.command_buffers_gfx = Renderer::create_command_buffers_gfx(
+        self.command_buffers = Renderer::create_command_buffers(
             &self.device,
-            self.command_pool_gfx,
+            self.command_pool,
             self.gfx_pipeline,
             self.render_pass,
             &self.framebuffers,
@@ -576,7 +566,7 @@ impl Renderer {
                     2,
                     vec![
                         queue_family.graphics_family.unwrap(),
-                        queue_family.present_family.unwrap(), // this is also transfer queue on my machine
+                        queue_family.present_family.unwrap(),
                     ],
                 )
             } else {
@@ -1013,10 +1003,7 @@ impl Renderer {
         (vertex_buffer, vertex_buffer_mem)
     }
 
-    fn create_command_pool_gfx(
-        device: &Device,
-        queue_family: &QueueFamilyIndices,
-    ) -> vk::CommandPool {
+    fn create_command_pool(device: &Device, queue_family: &QueueFamilyIndices) -> vk::CommandPool {
         let command_pool_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
@@ -1030,24 +1017,7 @@ impl Renderer {
         }
     }
 
-    fn create_command_pool_transfer(
-        device: &Device,
-        queue_family: &QueueFamilyIndices,
-    ) -> vk::CommandPool {
-        let command_pool_info = vk::CommandPoolCreateInfo {
-            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::CommandPoolCreateFlags::empty(),
-            queue_family_index: queue_family.transfer_family.unwrap(),
-        };
-        unsafe {
-            device
-                .create_command_pool(&command_pool_info, None)
-                .expect("Failed to create command pool")
-        }
-    }
-
-    fn create_command_buffers_gfx(
+    fn create_command_buffers(
         device: &Device,
         command_pool: vk::CommandPool,
         gfx_pipeline: vk::Pipeline,
@@ -1118,26 +1088,6 @@ impl Renderer {
                     .expect("Failed to end record command buffer");
             }
         }
-        command_buffers
-    }
-
-    fn create_command_buffers_transfer(
-        device: &Device,
-        command_pool: vk::CommandPool,
-        frambuffers: &Vec<vk::Framebuffer>,
-    ) -> Vec<vk::CommandBuffer> {
-        let command_buffer_info = vk::CommandBufferAllocateInfo {
-            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            command_buffer_count: frambuffers.len() as u32,
-            command_pool,
-            level: vk::CommandBufferLevel::PRIMARY,
-        };
-        let command_buffers = unsafe {
-            device
-                .allocate_command_buffers(&command_buffer_info)
-                .expect("Failed to allocate command buffers")
-        };
         command_buffers
     }
 
@@ -1280,7 +1230,7 @@ impl Renderer {
     fn drop_swapchain(&self) {
         unsafe {
             self.device
-                .free_command_buffers(self.command_pool_gfx, &self.command_buffers_gfx);
+                .free_command_buffers(self.command_pool, &self.command_buffers);
             for &framebuffer in self.framebuffers.iter() {
                 self.device.destroy_framebuffer(framebuffer, None);
             }
@@ -1310,10 +1260,7 @@ impl Drop for Renderer {
             self.drop_swapchain();
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_mem, None);
-            self.device
-                .destroy_command_pool(self.command_pool_gfx, None);
-            self.device
-                .destroy_command_pool(self.command_pool_transfer, None);
+            self.device.destroy_command_pool(self.command_pool, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);
             if VALIDATION.is_enabled {

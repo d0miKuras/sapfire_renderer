@@ -7,7 +7,6 @@ pub struct DeviceExtension {
 pub struct QueueFamilyIndices {
     pub graphics_family: Option<u32>,
     pub present_family: Option<u32>,
-    pub transfer_family: Option<u32>,
 }
 
 pub struct SwapChainSupportInfo {
@@ -170,7 +169,6 @@ pub fn find_queue_family(
     let mut queue_family_indices = QueueFamilyIndices {
         graphics_family: None,
         present_family: None,
-        transfer_family: None,
     };
     let mut index = 0;
     for fam in queue_families {
@@ -191,16 +189,8 @@ pub fn find_queue_family(
             queue_family_indices.present_family = Some(index);
         }
 
-        if fam.queue_count > 0
-            && fam.queue_flags.contains(ash::vk::QueueFlags::TRANSFER)
-            && !fam.queue_flags.contains(ash::vk::QueueFlags::GRAPHICS)
-        {
-            queue_family_indices.transfer_family = Some(index);
-        }
-
         if queue_family_indices.graphics_family.is_some()
             && queue_family_indices.present_family.is_some()
-            && queue_family_indices.transfer_family.is_some()
         {
             break;
         }
