@@ -1,7 +1,7 @@
 use ash::vk;
 
 #[repr(C)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],

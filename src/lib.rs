@@ -1,10 +1,12 @@
 use ash::extensions;
+use ash::util;
 use ash::vk;
 use ash::Device;
 use ash::Entry;
 use ash::Instance;
 use debug::{populate_debug_messenger_create_info, ValidationInfo};
 use queries::QueueFamilyIndices;
+use std::mem::align_of;
 use std::{ffi::CString, os::raw::c_void, ptr};
 use vertex::Vertex;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
@@ -108,6 +110,7 @@ pub struct Renderer {
     gfx_pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
+    command_pool_transient: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
@@ -141,6 +144,7 @@ impl Renderer {
                 swapchain_data.swapchain_format,
                 &swapchain_data.swapchain_images,
             );
+
             let render_pass =
                 Renderer::create_render_pass(&device, swapchain_data.swapchain_format);
             let (gfx_pipeline, pipeline_layout) = Renderer::create_graphics_pipeline(
@@ -148,15 +152,35 @@ impl Renderer {
                 render_pass,
                 swapchain_data.swapchain_extent,
             );
+
             let framebuffers = Renderer::create_framebuffers(
                 &device,
                 render_pass,
                 &swapchain_imageviews,
                 &swapchain_data.swapchain_extent,
             );
-            let (vertex_buffer, vertex_buffer_mem) =
-                Renderer::create_vertex_buffer(&instance, &device, gpu);
-            let command_pool = Renderer::create_command_pool(&device, &indices);
+
+            let command_pool = Renderer::create_command_pool(
+                &device,
+                &indices,
+                vk::CommandPoolCreateFlags::empty(),
+            );
+
+            let command_pool_transient = Renderer::create_command_pool(
+                &device,
+                &indices,
+                vk::CommandPoolCreateFlags::TRANSIENT,
+            );
+
+            let (vertex_buffer, vertex_buffer_mem) = Renderer::create_vertex_buffer(
+                &instance,
+                &device,
+                gpu,
+                command_pool_transient,
+                gfx_queue,
+                &VERTICES_DATA,
+            );
+
             let command_buffers = Renderer::create_command_buffers(
                 &device,
                 command_pool,
@@ -166,6 +190,7 @@ impl Renderer {
                 swapchain_data.swapchain_extent,
                 vertex_buffer,
             );
+
             let sync_object = Renderer::create_sync_objects(&device);
             Renderer {
                 _entry: entry,
@@ -190,6 +215,7 @@ impl Renderer {
                 gfx_pipeline,
                 framebuffers,
                 command_pool,
+                command_pool_transient,
                 command_buffers,
                 image_available_semaphores: sync_object.image_available_semaphores,
                 render_finished_semaphores: sync_object.render_finished_semaphores,
@@ -952,62 +978,85 @@ impl Renderer {
         instance: &Instance,
         device: &Device,
         gpu: vk::PhysicalDevice,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+        data: &[Vertex],
     ) -> (vk::Buffer, vk::DeviceMemory) {
-        let vertex_buffer_info = vk::BufferCreateInfo {
-            s_type: vk::StructureType::BUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::BufferCreateFlags::empty(),
-            size: std::mem::size_of_val(&VERTICES_DATA) as u64,
-            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0,
-            p_queue_family_indices: ptr::null(),
-        };
-        let vertex_buffer = unsafe {
-            device
-                .create_buffer(&vertex_buffer_info, None)
-                .expect("Failed to create vertex buffer")
-        };
-        let mem_reqs = unsafe { device.get_buffer_memory_requirements(vertex_buffer) };
-        let mem_props = unsafe { instance.get_physical_device_memory_properties(gpu) };
-        let req_mem_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let mem_type =
-            Renderer::pick_memory_type(mem_reqs.memory_type_bits, req_mem_flags, mem_props);
-        let alloc_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            allocation_size: mem_reqs.size,
-            memory_type_index: mem_type,
-        };
-        let vertex_buffer_mem = unsafe {
-            device
-                .allocate_memory(&alloc_info, None)
-                .expect("Failed to allocate memory for vertex buffer")
-        };
-        unsafe {
-            device
-                .bind_buffer_memory(vertex_buffer, vertex_buffer_mem, 0)
-                .expect("Failed to bind buffer memory");
-            let data_ptr = device
-                .map_memory(
-                    vertex_buffer_mem,
-                    0,
-                    vertex_buffer_info.size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .expect("Failed to map memory") as *mut Vertex;
-            data_ptr.copy_from_nonoverlapping(VERTICES_DATA.as_ptr(), VERTICES_DATA.len());
-            device.unmap_memory(vertex_buffer_mem);
-        };
-        (vertex_buffer, vertex_buffer_mem)
+        Renderer::create_device_local_buffer_with_data::<u32, _>(
+            instance,
+            device,
+            gpu,
+            transfer_queue,
+            command_pool,
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            data,
+        )
     }
 
-    fn create_command_pool(device: &Device, queue_family: &QueueFamilyIndices) -> vk::CommandPool {
+    fn create_device_local_buffer_with_data<A, T: Copy>(
+        instance: &Instance,
+        device: &Device,
+        gpu: vk::PhysicalDevice,
+        transfer_queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        usage: vk::BufferUsageFlags,
+        data: &[T],
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_size = std::mem::size_of_val(data) as vk::DeviceSize;
+        let device_memory_props = unsafe { instance.get_physical_device_memory_properties(gpu) };
+
+        let (staging_buffer, staging_buffer_memory, staging_mem_size) = Renderer::create_buffer(
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            &device_memory_props,
+        );
+        unsafe {
+            let data_ptr = device
+                .map_memory(
+                    staging_buffer_memory,
+                    0,
+                    buffer_size,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .expect("Failed to map memory");
+            let mut align = util::Align::new(data_ptr, align_of::<A>() as _, staging_mem_size);
+            align.copy_from_slice(data);
+            device.unmap_memory(staging_buffer_memory);
+        };
+        let (buffer, mem, _) = Renderer::create_buffer(
+            device,
+            buffer_size,
+            vk::BufferUsageFlags::TRANSFER_DST | usage,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            &device_memory_props,
+        );
+        Renderer::copy_buffer(
+            device,
+            transfer_queue,
+            command_pool,
+            staging_buffer,
+            buffer,
+            buffer_size,
+        );
+
+        unsafe {
+            device.destroy_buffer(staging_buffer, None);
+            device.free_memory(staging_buffer_memory, None);
+        };
+        (buffer, mem)
+    }
+
+    fn create_command_pool(
+        device: &Device,
+        queue_family: &QueueFamilyIndices,
+        flags: vk::CommandPoolCreateFlags,
+    ) -> vk::CommandPool {
         let command_pool_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
-            flags: vk::CommandPoolCreateFlags::empty(),
+            flags,
             queue_family_index: queue_family.graphics_family.unwrap(),
         };
         unsafe {
@@ -1089,6 +1138,131 @@ impl Renderer {
             }
         }
         command_buffers
+    }
+
+    fn create_buffer(
+        device: &Device,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        required_mem_props: vk::MemoryPropertyFlags,
+        device_mem_props: &vk::PhysicalDeviceMemoryProperties,
+    ) -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
+        let buffer_create_info = vk::BufferCreateInfo {
+            s_type: vk::StructureType::BUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::BufferCreateFlags::empty(),
+            size,
+            usage,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(),
+        };
+        let buffer = unsafe {
+            device
+                .create_buffer(&buffer_create_info, None)
+                .expect("Failed to create buffer")
+        };
+        let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let mem_type = Renderer::find_memory_type(
+            mem_reqs.memory_type_bits,
+            required_mem_props,
+            device_mem_props,
+        );
+        let alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            allocation_size: mem_reqs.size,
+            memory_type_index: mem_type,
+        };
+        let buffer_memory = unsafe {
+            device
+                .allocate_memory(&alloc_info, None)
+                .expect("Failed to allocate buffer memory")
+        };
+        unsafe {
+            device
+                .bind_buffer_memory(buffer, buffer_memory, 0)
+                .expect("Failed to bind buffer");
+        }
+        (buffer, buffer_memory, mem_reqs.size)
+    }
+
+    fn copy_buffer(
+        device: &Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        src_buffer: vk::Buffer,
+        dst_buffer: vk::Buffer,
+        size: vk::DeviceSize,
+    ) {
+        let allocate_info = vk::CommandBufferAllocateInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            command_buffer_count: 1,
+            command_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+        };
+
+        let command_buffers = unsafe {
+            device
+                .allocate_command_buffers(&allocate_info)
+                .expect("Failed to allocate command buffer")
+        };
+        let command_buffer = command_buffers[0];
+        let begin_info = vk::CommandBufferBeginInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            p_inheritance_info: ptr::null(),
+        };
+        unsafe {
+            device
+                .begin_command_buffer(command_buffer, &begin_info)
+                .expect("Failed to begin command buffer");
+            let copy_regions = [vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size,
+            }];
+            device.cmd_copy_buffer(command_buffer, src_buffer, dst_buffer, &copy_regions);
+            device
+                .end_command_buffer(command_buffer)
+                .expect("Failed to end command buffer");
+        }
+        let submit_infos = [vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: 0,
+            p_wait_semaphores: ptr::null(),
+            p_wait_dst_stage_mask: ptr::null(),
+            signal_semaphore_count: 0,
+            p_signal_semaphores: ptr::null(),
+            command_buffer_count: 1,
+            p_command_buffers: &command_buffer,
+        }];
+        unsafe {
+            device
+                .queue_submit(queue, &submit_infos, vk::Fence::null())
+                .expect("Failed to submit queue");
+            device
+                .queue_wait_idle(queue)
+                .expect("Failed to wait for queue to become idle");
+            device.free_command_buffers(command_pool, &command_buffers);
+        }
+    }
+
+    fn find_memory_type(
+        type_filter: u32,
+        required_properties: vk::MemoryPropertyFlags,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    ) -> u32 {
+        for (i, mem_type) in memory_properties.memory_types.iter().enumerate() {
+            if (type_filter & (1 << i)) > 0 && mem_type.property_flags.contains(required_properties)
+            {
+                return i as u32;
+            }
+        }
+        panic!("Failed to find suitable memory type")
     }
 
     fn create_sync_objects(device: &Device) -> SyncObjects {
@@ -1260,6 +1434,8 @@ impl Drop for Renderer {
             self.drop_swapchain();
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_mem, None);
+            self.device
+                .destroy_command_pool(self.command_pool_transient, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.device.destroy_device(None);
