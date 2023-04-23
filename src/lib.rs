@@ -4,6 +4,7 @@ use ash::vk;
 use ash::Device;
 use ash::Entry;
 use ash::Instance;
+use context::VkContext;
 use debug::{populate_debug_messenger_create_info, ValidationInfo};
 use queries::QueueFamilyIndices;
 use std::mem::align_of;
@@ -11,6 +12,7 @@ use std::{ffi::CString, os::raw::c_void, ptr};
 use vertex::Vertex;
 use winit::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+mod context;
 mod debug;
 mod helpers;
 mod queries;
@@ -94,14 +96,9 @@ struct SyncObjects {
 }
 
 pub struct Renderer {
-    _entry: Entry,
-    instance: Instance,
-    surface: vk::SurfaceKHR,
-    surface_loader: extensions::khr::Surface,
+    context: VkContext,
     debug_utils_loader: extensions::ext::DebugUtils,
     debug_messenger: vk::DebugUtilsMessengerEXT,
-    gpu: vk::PhysicalDevice,
-    device: Device,
     queue_family: QueueFamilyIndices,
     gfx_queue: vk::Queue,
     present_queue: vk::Queue,
@@ -144,62 +141,62 @@ impl Renderer {
             let surface_data = Renderer::create_surface(&entry, &instance, window);
             let gpu = Renderer::pick_suitable_physical_device(&instance, &surface_data);
             let (device, indices) = Renderer::create_logical_device(&instance, gpu, &surface_data);
-            let gfx_queue = device.get_device_queue(indices.graphics_family.unwrap(), 0);
-            let present_queue = device.get_device_queue(indices.present_family.unwrap(), 0);
-            let swapchain_data =
-                Renderer::create_swap_chain(&instance, &device, gpu, &surface_data, &indices);
+            let context = VkContext::new(entry, instance, surface_data, gpu, device);
+            let gfx_queue = context
+                .device
+                .get_device_queue(indices.graphics_family.unwrap(), 0);
+            let present_queue = context
+                .device
+                .get_device_queue(indices.present_family.unwrap(), 0);
+            let swapchain_data = Renderer::create_swap_chain(&context, &indices);
             let swapchain_imageviews = Renderer::create_image_views(
-                &device,
+                &context.device,
                 swapchain_data.swapchain_format,
                 &swapchain_data.swapchain_images,
             );
 
             let render_pass =
-                Renderer::create_render_pass(&device, swapchain_data.swapchain_format);
+                Renderer::create_render_pass(&context.device, swapchain_data.swapchain_format);
             let (gfx_pipeline, pipeline_layout) = Renderer::create_graphics_pipeline(
-                &device,
+                &context.device,
                 render_pass,
                 swapchain_data.swapchain_extent,
             );
 
             let framebuffers = Renderer::create_framebuffers(
-                &device,
+                &context.device,
                 render_pass,
                 &swapchain_imageviews,
                 &swapchain_data.swapchain_extent,
             );
 
             let command_pool = Renderer::create_command_pool(
-                &device,
+                &context.device,
                 &indices,
                 vk::CommandPoolCreateFlags::empty(),
             );
 
             let command_pool_transient = Renderer::create_command_pool(
-                &device,
+                &context.device,
                 &indices,
                 vk::CommandPoolCreateFlags::TRANSIENT,
             );
 
             let (vertex_buffer, vertex_buffer_mem) = Renderer::create_vertex_buffer(
-                &instance,
-                &device,
-                gpu,
+                &context,
                 command_pool_transient,
                 gfx_queue,
                 &VERTICES_DATA,
             );
             let (index_buffer, index_buffer_mem) = Renderer::create_index_buffer(
-                &instance,
-                &device,
-                gpu,
+                &context,
                 command_pool_transient,
                 gfx_queue,
                 &INDICES_DATA,
             );
 
             let command_buffers = Renderer::create_command_buffers(
-                &device,
+                &context.device,
                 command_pool,
                 gfx_pipeline,
                 render_pass,
@@ -210,19 +207,14 @@ impl Renderer {
                 INDICES_DATA.len() as u32,
             );
 
-            let sync_object = Renderer::create_sync_objects(&device);
+            let sync_object = Renderer::create_sync_objects(&context.device);
             Renderer {
-                _entry: entry,
-                instance,
+                context,
                 debug_utils_loader,
                 debug_messenger,
-                gpu,
-                device,
                 queue_family: indices,
                 gfx_queue,
                 present_queue,
-                surface: surface_data.surface,
-                surface_loader: surface_data.surface_loader,
                 swapchain: swapchain_data.swapchain,
                 swapchain_loader: swapchain_data.swapchain_loader,
                 swapchain_images: swapchain_data.swapchain_images,
@@ -282,7 +274,8 @@ impl Renderer {
             Event::RedrawEventsCleared => window.request_redraw(),
             Event::RedrawRequested(_windowid) => self.draw_frame(),
             Event::LoopDestroyed => unsafe {
-                self.device
+                self.context
+                    .device
                     .device_wait_idle()
                     .expect("Failed to wait for device to become idle");
             },
@@ -294,7 +287,8 @@ impl Renderer {
     fn draw_frame(&mut self) {
         let wait_fences = [self.in_flight_fences[self.current_frame]];
         unsafe {
-            self.device
+            self.context
+                .device
                 .wait_for_fences(&wait_fences, true, std::u64::MAX)
                 .expect("Failed to wait for fences");
         };
@@ -333,10 +327,12 @@ impl Renderer {
             p_signal_semaphores: signal_semaphores.as_ptr(),
         }];
         unsafe {
-            self.device
+            self.context
+                .device
                 .reset_fences(&wait_fences)
                 .expect("Failed to reset wait fences");
-            self.device
+            self.context
+                .device
                 .queue_submit(
                     self.gfx_queue,
                     &submit_infos,
@@ -381,48 +377,45 @@ impl Renderer {
     }
     fn recreate_swapchain(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         let surface_data = SurfaceData {
-            surface: self.surface,
-            surface_loader: self.surface_loader.clone(),
+            surface: self.context.surface_data.surface,
+            surface_loader: self.context.surface_data.surface_loader.clone(),
             width: size.width,
             height: size.height,
         };
+        self.context.surface_data = surface_data;
         unsafe {
-            self.device
+            self.context
+                .device
                 .device_wait_idle()
                 .expect("Failed to wait for the device to become idle");
         }
         self.drop_swapchain();
-        let swapchain_data = Renderer::create_swap_chain(
-            &self.instance,
-            &self.device,
-            self.gpu,
-            &surface_data,
-            &self.queue_family,
-        );
+        let swapchain_data = Renderer::create_swap_chain(&self.context, &self.queue_family);
         self.swapchain = swapchain_data.swapchain;
         self.swapchain_extent = swapchain_data.swapchain_extent;
         self.swapchain_format = swapchain_data.swapchain_format;
         self.swapchain_loader = swapchain_data.swapchain_loader;
         self.swapchain_images = swapchain_data.swapchain_images;
         self.swapchain_imageviews = Renderer::create_image_views(
-            &self.device,
+            &self.context.device,
             self.swapchain_format,
             &self.swapchain_images,
         );
-        self.render_pass = Renderer::create_render_pass(&self.device, self.swapchain_format);
+        self.render_pass =
+            Renderer::create_render_pass(&self.context.device, self.swapchain_format);
         (self.gfx_pipeline, self.pipeline_layout) = Renderer::create_graphics_pipeline(
-            &self.device,
+            &self.context.device,
             self.render_pass,
             swapchain_data.swapchain_extent,
         );
         self.framebuffers = Renderer::create_framebuffers(
-            &self.device,
+            &self.context.device,
             self.render_pass,
             &self.swapchain_imageviews,
             &self.swapchain_extent,
         );
         self.command_buffers = Renderer::create_command_buffers(
-            &self.device,
+            &self.context.device,
             self.command_pool,
             self.gfx_pipeline,
             self.render_pass,
@@ -598,14 +591,9 @@ impl Renderer {
         }
     }
 
-    fn create_swap_chain(
-        instance: &Instance,
-        device: &Device,
-        physical_device: vk::PhysicalDevice,
-        surface_data: &SurfaceData,
-        queue_family: &QueueFamilyIndices,
-    ) -> SwapChainData {
-        let swapchain_support = queries::query_swapchain_support(physical_device, surface_data);
+    fn create_swap_chain(context: &VkContext, queue_family: &QueueFamilyIndices) -> SwapChainData {
+        let swapchain_support =
+            queries::query_swapchain_support(context.physical_device, &context.surface_data);
         let surface_format = Renderer::pick_swapchain_format(&swapchain_support.formats);
         let present_mode = Renderer::pick_swapchain_present_mode(&swapchain_support.present_modes);
         let extent = Renderer::pick_swapchain_extent(&swapchain_support.capabilities);
@@ -624,7 +612,7 @@ impl Renderer {
             };
         let swapchain_create_info = vk::SwapchainCreateInfoKHR {
             s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
-            surface: surface_data.surface,
+            surface: context.surface_data.surface,
             min_image_count: swapchain_support.capabilities.min_image_count + 1,
             p_next: ptr::null(),
             flags: vk::SwapchainCreateFlagsKHR::empty(),
@@ -642,7 +630,7 @@ impl Renderer {
             clipped: vk::TRUE,
             old_swapchain: vk::SwapchainKHR::null(),
         };
-        let swapchain_loader = extensions::khr::Swapchain::new(instance, device);
+        let swapchain_loader = extensions::khr::Swapchain::new(&context.instance, &context.device);
         let swapchain = unsafe {
             swapchain_loader
                 .create_swapchain(&swapchain_create_info, None)
@@ -999,17 +987,13 @@ impl Renderer {
     }
 
     fn create_vertex_buffer(
-        instance: &Instance,
-        device: &Device,
-        gpu: vk::PhysicalDevice,
+        context: &VkContext,
         command_pool: vk::CommandPool,
         transfer_queue: vk::Queue,
         data: &[Vertex],
     ) -> (vk::Buffer, vk::DeviceMemory) {
         Renderer::create_device_local_buffer_with_data::<u32, _>(
-            instance,
-            device,
-            gpu,
+            context,
             transfer_queue,
             command_pool,
             vk::BufferUsageFlags::VERTEX_BUFFER,
@@ -1018,17 +1002,13 @@ impl Renderer {
     }
 
     fn create_index_buffer(
-        instance: &Instance,
-        device: &Device,
-        gpu: vk::PhysicalDevice,
+        context: &VkContext,
         command_pool: vk::CommandPool,
         transfer_queue: vk::Queue,
         data: &[u32],
     ) -> (vk::Buffer, vk::DeviceMemory) {
         Renderer::create_device_local_buffer_with_data::<u16, _>(
-            instance,
-            device,
-            gpu,
+            context,
             transfer_queue,
             command_pool,
             vk::BufferUsageFlags::INDEX_BUFFER,
@@ -1037,26 +1017,25 @@ impl Renderer {
     }
 
     fn create_device_local_buffer_with_data<A, T: Copy>(
-        instance: &Instance,
-        device: &Device,
-        gpu: vk::PhysicalDevice,
+        context: &VkContext,
         transfer_queue: vk::Queue,
         command_pool: vk::CommandPool,
         usage: vk::BufferUsageFlags,
         data: &[T],
     ) -> (vk::Buffer, vk::DeviceMemory) {
         let buffer_size = std::mem::size_of_val(data) as vk::DeviceSize;
-        let device_memory_props = unsafe { instance.get_physical_device_memory_properties(gpu) };
+        let device_memory_props = context.get_mem_properties();
 
         let (staging_buffer, staging_buffer_memory, staging_mem_size) = Renderer::create_buffer(
-            device,
+            &context.device,
             buffer_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             &device_memory_props,
         );
         unsafe {
-            let data_ptr = device
+            let data_ptr = context
+                .device
                 .map_memory(
                     staging_buffer_memory,
                     0,
@@ -1066,17 +1045,17 @@ impl Renderer {
                 .expect("Failed to map memory");
             let mut align = util::Align::new(data_ptr, align_of::<A>() as _, staging_mem_size);
             align.copy_from_slice(data);
-            device.unmap_memory(staging_buffer_memory);
+            context.device.unmap_memory(staging_buffer_memory);
         };
         let (buffer, mem, _) = Renderer::create_buffer(
-            device,
+            &context.device,
             buffer_size,
             vk::BufferUsageFlags::TRANSFER_DST | usage,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             &device_memory_props,
         );
         Renderer::copy_buffer(
-            device,
+            &context.device,
             transfer_queue,
             command_pool,
             staging_buffer,
@@ -1085,8 +1064,8 @@ impl Renderer {
         );
 
         unsafe {
-            device.destroy_buffer(staging_buffer, None);
-            device.free_memory(staging_buffer_memory, None);
+            context.device.destroy_buffer(staging_buffer, None);
+            context.device.free_memory(staging_buffer_memory, None);
         };
         (buffer, mem)
     }
@@ -1440,17 +1419,23 @@ impl Renderer {
 
     fn drop_swapchain(&self) {
         unsafe {
-            self.device
+            self.context
+                .device
                 .free_command_buffers(self.command_pool, &self.command_buffers);
             for &framebuffer in self.framebuffers.iter() {
-                self.device.destroy_framebuffer(framebuffer, None);
+                self.context.device.destroy_framebuffer(framebuffer, None);
             }
-            self.device.destroy_pipeline(self.gfx_pipeline, None);
-            self.device
+            self.context
+                .device
+                .destroy_pipeline(self.gfx_pipeline, None);
+            self.context
+                .device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
+            self.context
+                .device
+                .destroy_render_pass(self.render_pass, None);
             for &imageview in self.swapchain_imageviews.iter() {
-                self.device.destroy_image_view(imageview, None);
+                self.context.device.destroy_image_view(imageview, None);
             }
             self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
@@ -1462,27 +1447,33 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe {
             for i in 0..MAX_FRAMES_IN_FLIGHT {
-                self.device
+                self.context
+                    .device
                     .destroy_semaphore(self.image_available_semaphores[i], None);
-                self.device
+                self.context
+                    .device
                     .destroy_semaphore(self.render_finished_semaphores[i], None);
-                self.device.destroy_fence(self.in_flight_fences[i], None);
+                self.context
+                    .device
+                    .destroy_fence(self.in_flight_fences[i], None);
             }
             self.drop_swapchain();
-            self.device.destroy_buffer(self.vertex_buffer, None);
-            self.device.free_memory(self.vertex_buffer_mem, None);
-            self.device.destroy_buffer(self.index_buffer, None);
-            self.device.free_memory(self.index_buffer_mem, None);
-            self.device
+            self.context.device.destroy_buffer(self.vertex_buffer, None);
+            self.context
+                .device
+                .free_memory(self.vertex_buffer_mem, None);
+            self.context.device.destroy_buffer(self.index_buffer, None);
+            self.context.device.free_memory(self.index_buffer_mem, None);
+            self.context
+                .device
                 .destroy_command_pool(self.command_pool_transient, None);
-            self.device.destroy_command_pool(self.command_pool, None);
-            self.surface_loader.destroy_surface(self.surface, None);
-            self.device.destroy_device(None);
+            self.context
+                .device
+                .destroy_command_pool(self.command_pool, None);
             if VALIDATION.is_enabled {
                 self.debug_utils_loader
                     .destroy_debug_utils_messenger(self.debug_messenger, None);
             }
-            self.instance.destroy_instance(None);
         }
     }
 }
