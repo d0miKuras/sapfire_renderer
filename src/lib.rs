@@ -20,20 +20,26 @@ const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 600;
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-const VERTICES_DATA: [Vertex; 3] = [
+const VERTICES_DATA: [Vertex; 4] = [
     Vertex {
-        position: [0.0, -0.5, 0.0],
+        position: [-0.5, -0.5, 0.0],
         color: [1.0, 0.0, 0.0],
     },
     Vertex {
-        position: [0.5, 0.5, 0.0],
+        position: [0.5, -0.5, 0.0],
         color: [0.0, 1.0, 0.0],
     },
     Vertex {
-        position: [-0.5, 0.5, 0.0],
+        position: [0.5, 0.5, 0.0],
         color: [0.0, 0.0, 1.0],
     },
+    Vertex {
+        position: [-0.5, 0.5, 0.0],
+        color: [1.0, 1.0, 1.0],
+    },
 ];
+
+const INDICES_DATA: [u32; 6] = [0, 1, 2, 2, 3, 0];
 
 const VERTEX_SHADER: &str = "
 #version 450
@@ -119,6 +125,9 @@ pub struct Renderer {
     is_framebuffer_resized: bool,
     vertex_buffer: vk::Buffer,
     vertex_buffer_mem: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_mem: vk::DeviceMemory,
+    ind_buf_len: u32,
 }
 
 impl Renderer {
@@ -180,6 +189,14 @@ impl Renderer {
                 gfx_queue,
                 &VERTICES_DATA,
             );
+            let (index_buffer, index_buffer_mem) = Renderer::create_index_buffer(
+                &instance,
+                &device,
+                gpu,
+                command_pool_transient,
+                gfx_queue,
+                &INDICES_DATA,
+            );
 
             let command_buffers = Renderer::create_command_buffers(
                 &device,
@@ -189,6 +206,8 @@ impl Renderer {
                 &framebuffers,
                 swapchain_data.swapchain_extent,
                 vertex_buffer,
+                index_buffer,
+                INDICES_DATA.len() as u32,
             );
 
             let sync_object = Renderer::create_sync_objects(&device);
@@ -224,6 +243,9 @@ impl Renderer {
                 is_framebuffer_resized: false,
                 vertex_buffer,
                 vertex_buffer_mem,
+                index_buffer,
+                index_buffer_mem,
+                ind_buf_len: INDICES_DATA.len() as u32,
             }
         }
     }
@@ -407,6 +429,8 @@ impl Renderer {
             &self.framebuffers,
             self.swapchain_extent,
             self.vertex_buffer,
+            self.index_buffer,
+            self.ind_buf_len,
         )
     }
 
@@ -993,6 +1017,25 @@ impl Renderer {
         )
     }
 
+    fn create_index_buffer(
+        instance: &Instance,
+        device: &Device,
+        gpu: vk::PhysicalDevice,
+        command_pool: vk::CommandPool,
+        transfer_queue: vk::Queue,
+        data: &[u32],
+    ) -> (vk::Buffer, vk::DeviceMemory) {
+        Renderer::create_device_local_buffer_with_data::<u16, _>(
+            instance,
+            device,
+            gpu,
+            transfer_queue,
+            command_pool,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            data,
+        )
+    }
+
     fn create_device_local_buffer_with_data<A, T: Copy>(
         instance: &Instance,
         device: &Device,
@@ -1074,6 +1117,8 @@ impl Renderer {
         frambuffers: &Vec<vk::Framebuffer>,
         surface_extent: vk::Extent2D,
         vertex_buffer: vk::Buffer,
+        index_buffer: vk::Buffer,
+        ind_buf_len: u32,
     ) -> Vec<vk::CommandBuffer> {
         let command_buffer_info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1130,7 +1175,13 @@ impl Renderer {
                 let vertex_buffers = [vertex_buffer];
                 let offsets = [0_u64];
                 device.cmd_bind_vertex_buffers(command_buffer, 0, &vertex_buffers, &offsets);
-                device.cmd_draw(command_buffer, VERTICES_DATA.len() as u32, 1, 0, 0);
+                device.cmd_bind_index_buffer(
+                    command_buffer,
+                    index_buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
+                device.cmd_draw_indexed(command_buffer, ind_buf_len, 1, 0, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
                 device
                     .end_command_buffer(command_buffer)
@@ -1163,7 +1214,7 @@ impl Renderer {
                 .expect("Failed to create buffer")
         };
         let mem_reqs = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let mem_type = Renderer::find_memory_type(
+        let mem_type = Renderer::pick_memory_type(
             mem_reqs.memory_type_bits,
             required_mem_props,
             device_mem_props,
@@ -1249,20 +1300,6 @@ impl Renderer {
                 .expect("Failed to wait for queue to become idle");
             device.free_command_buffers(command_pool, &command_buffers);
         }
-    }
-
-    fn find_memory_type(
-        type_filter: u32,
-        required_properties: vk::MemoryPropertyFlags,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-    ) -> u32 {
-        for (i, mem_type) in memory_properties.memory_types.iter().enumerate() {
-            if (type_filter & (1 << i)) > 0 && mem_type.property_flags.contains(required_properties)
-            {
-                return i as u32;
-            }
-        }
-        panic!("Failed to find suitable memory type")
     }
 
     fn create_sync_objects(device: &Device) -> SyncObjects {
@@ -1390,7 +1427,7 @@ impl Renderer {
     fn pick_memory_type(
         type_filter: u32,
         required_properties: vk::MemoryPropertyFlags,
-        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
     ) -> u32 {
         for (i, mem_type) in memory_properties.memory_types.iter().enumerate() {
             if (type_filter & (1 << i)) > 0 && mem_type.property_flags.contains(required_properties)
@@ -1434,6 +1471,8 @@ impl Drop for Renderer {
             self.drop_swapchain();
             self.device.destroy_buffer(self.vertex_buffer, None);
             self.device.free_memory(self.vertex_buffer_mem, None);
+            self.device.destroy_buffer(self.index_buffer, None);
+            self.device.free_memory(self.index_buffer_mem, None);
             self.device
                 .destroy_command_pool(self.command_pool_transient, None);
             self.device.destroy_command_pool(self.command_pool, None);
