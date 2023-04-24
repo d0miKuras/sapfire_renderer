@@ -3,11 +3,12 @@ use ash::{vk, Device, Entry, Instance};
 use crate::SurfaceData;
 
 pub struct VkContext {
-    pub _entry: Entry,
+    pub entry: Entry,
     pub instance: Instance,
     pub surface_data: SurfaceData,
     pub physical_device: vk::PhysicalDevice,
     pub device: Device,
+    pub physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
 }
 
 impl VkContext {
@@ -18,19 +19,15 @@ impl VkContext {
         physical_device: vk::PhysicalDevice,
         device: Device,
     ) -> VkContext {
+        let physical_device_memory_properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
         VkContext {
-            _entry: entry,
+            entry,
             instance,
             surface_data,
             physical_device,
             device,
-        }
-    }
-
-    pub fn get_mem_properties(&self) -> vk::PhysicalDeviceMemoryProperties {
-        unsafe {
-            self.instance
-                .get_physical_device_memory_properties(self.physical_device)
+            physical_device_memory_properties,
         }
     }
 }
