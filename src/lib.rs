@@ -1590,7 +1590,7 @@ pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
 
-#[cfg(all(unix))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn required_device_extension_names() -> Vec<*const i8> {
     vec![vk::KhrSwapchainFn::name().as_ptr()]
 }
