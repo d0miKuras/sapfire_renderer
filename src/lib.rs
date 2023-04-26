@@ -156,6 +156,8 @@ pub struct Renderer {
     ubos: Vec<vk::Buffer>,
     ubo_mems: Vec<vk::DeviceMemory>,
     descriptor_set_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 impl Renderer {
@@ -235,6 +237,16 @@ impl Renderer {
                 &context,
                 swapchain_data.swapchain_images.len(),
             );
+            let descriptor_pool = Renderer::create_descriptor_pool(
+                &context.device,
+                swapchain_data.swapchain_images.len() as u32,
+            );
+            let descriptor_sets = Renderer::create_descriptor_sets(
+                &context.device,
+                descriptor_pool,
+                descriptor_set_layouts[0],
+                &ubos,
+            );
 
             let command_buffers = Renderer::create_command_buffers(
                 &context.device,
@@ -246,6 +258,8 @@ impl Renderer {
                 vertex_buffer,
                 index_buffer,
                 INDICES_DATA.len() as u32,
+                pipeline_layout,
+                &descriptor_sets,
             );
 
             let sync_object = Renderer::create_sync_objects(&context.device);
@@ -282,6 +296,8 @@ impl Renderer {
                 ubos,
                 ubo_mems,
                 descriptor_set_layout: descriptor_set_layouts[0],
+                descriptor_pool,
+                descriptor_sets,
             }
         }
     }
@@ -469,6 +485,8 @@ impl Renderer {
             self.vertex_buffer,
             self.index_buffer,
             self.ind_buf_len,
+            self.pipeline_layout,
+            &self.descriptor_sets,
         )
     }
 
@@ -1141,6 +1159,8 @@ impl Renderer {
         vertex_buffer: vk::Buffer,
         index_buffer: vk::Buffer,
         ind_buf_len: u32,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_sets: &[vk::DescriptorSet],
     ) -> Vec<vk::CommandBuffer> {
         let command_buffer_info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1202,6 +1222,15 @@ impl Renderer {
                     index_buffer,
                     0,
                     vk::IndexType::UINT32,
+                );
+                let null = [];
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    &descriptor_sets[i..=i],
+                    &null,
                 );
                 device.cmd_draw_indexed(command_buffer, ind_buf_len, 1, 0, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
@@ -1342,6 +1371,76 @@ impl Renderer {
                 .create_descriptor_set_layout(&layout_info, None)
                 .expect("Failed to create descriptor set layout")
         }
+    }
+
+    fn create_descriptor_pool(device: &Device, size: u32) -> vk::DescriptorPool {
+        let ubo_pool_size = vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: size,
+        };
+        let pool_sizes = [ubo_pool_size];
+        let descriptor_pool_create_info = vk::DescriptorPoolCreateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::DescriptorPoolCreateFlags::empty(),
+            max_sets: size,
+            pool_size_count: pool_sizes.len() as u32,
+            p_pool_sizes: pool_sizes.as_ptr(),
+        };
+        unsafe {
+            device
+                .create_descriptor_pool(&descriptor_pool_create_info, None)
+                .expect("Failed to create descriptor pool")
+        }
+    }
+
+    fn create_descriptor_sets(
+        device: &Device,
+        pool: vk::DescriptorPool,
+        layout: vk::DescriptorSetLayout,
+        uniform_buffers: &[vk::Buffer],
+    ) -> Vec<vk::DescriptorSet> {
+        let layouts = (0..uniform_buffers.len())
+            .map(|_| layout)
+            .collect::<Vec<vk::DescriptorSetLayout>>();
+        let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            descriptor_set_count: uniform_buffers.len() as u32,
+            descriptor_pool: pool,
+            p_set_layouts: layouts.as_ptr(),
+        };
+        let descriptor_sets = unsafe {
+            device
+                .allocate_descriptor_sets(&descriptor_set_allocate_info)
+                .expect("Failed to allocate descriptor sets")
+        };
+        descriptor_sets
+            .iter()
+            .zip(uniform_buffers.iter())
+            .for_each(|(set, &buf)| {
+                let buffer_info = vk::DescriptorBufferInfo {
+                    buffer: buf,
+                    offset: 0,
+                    range: std::mem::size_of::<CameraUBO>() as u64, // TODO: refactor this so that its generic
+                };
+                let ubo_descriptor_write = [vk::WriteDescriptorSet {
+                    s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                    p_next: ptr::null(),
+                    dst_set: *set,
+                    dst_binding: 0,
+                    dst_array_element: 0,
+                    descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                    p_image_info: ptr::null(),
+                    p_buffer_info: &buffer_info,
+                    p_texel_buffer_view: ptr::null(),
+                }];
+                unsafe {
+                    device.update_descriptor_sets(&ubo_descriptor_write, &[]);
+                }
+            });
+        descriptor_sets
     }
 
     fn create_sync_objects(device: &Device) -> SyncObjects {
@@ -1542,6 +1641,9 @@ impl Drop for Renderer {
                 self.context.device.destroy_buffer(self.ubos[i], None);
                 self.context.device.free_memory(self.ubo_mems[i], None);
             }
+            self.context
+                .device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
             self.context
                 .device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
