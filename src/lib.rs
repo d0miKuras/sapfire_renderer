@@ -1638,9 +1638,13 @@ impl Drop for Renderer {
                 self.context
                     .device
                     .destroy_fence(self.in_flight_fences[i], None);
-                self.context.device.destroy_buffer(self.ubos[i], None);
-                self.context.device.free_memory(self.ubo_mems[i], None);
             }
+            self.ubo_mems
+                .iter()
+                .for_each(|m| self.context.device.free_memory(*m, None));
+            self.ubos
+                .iter()
+                .for_each(|b| self.context.device.destroy_buffer(*b, None));
             self.context
                 .device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
